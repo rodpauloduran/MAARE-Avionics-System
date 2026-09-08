@@ -111,6 +111,24 @@ button[disabled]{opacity:.4;cursor:not-allowed;box-shadow:none}
 .dot.live{background:var(--ok)}
 .dot.demo{background:var(--amber)}
 .dot.err{background:var(--red)}
+.dot.stale{background:var(--amber)}
+/* board command group */
+.cmdgroup{display:flex;gap:6px;align-items:center}
+.cmdlabel{font-size:10px;letter-spacing:.08em;text-transform:uppercase;opacity:.55}
+/* stage tabs */
+.stagetabs{position:absolute;top:8px;right:10px;display:flex;gap:4px;z-index:3}
+.stagetabs .tab{
+  font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  padding:4px 9px;border-radius:3px;opacity:.62}
+.stagetabs .tab.on{opacity:1;border-color:var(--ink)}
+@media (max-width:560px){ .stagetabs{top:6px;right:8px} .stagetabs .tab{padding:3px 7px} }
+/* Telemetry has stopped arriving. Dimming the numbers is the whole point: a
+   frozen readout at full contrast is indistinguishable from a vehicle sitting
+   perfectly still, and that is the one confusion this display must never
+   cause. The strip charts need no equivalent -- they only advance on ingest,
+   so a gap stays a visible gap and is never back-filled. */
+body.stale .readouts{opacity:.42}
+body.stale footer#raw{opacity:.42}
 
 /* ---------- main split ---------- */
 .body{display:grid;grid-template-columns:1fr 268px;flex:1;min-height:0}
@@ -185,6 +203,12 @@ footer{
     <div class="controls">
       <button id="btnConnect" class="primary">Connect board</button>
       <button id="btnV" disabled>Toggle stream</button>
+      <span class="cmdgroup"><span class="cmdlabel">Board</span>
+        <button id="cmdZ" disabled title="Re-zero ground pressure to here (blocks ~1 s)">Zero baro</button>
+        <button id="cmdB" disabled title="Re-measure gyro bias - hold the board still (blocks ~1.5 s)">Gyro bias</button>
+        <button id="cmdR" disabled title="Reset the peak trackers, board and display">Reset peaks</button>
+        <button id="cmdG" disabled title="Print GPS status into the raw line">GPS status</button>
+      </span>
       <button id="btnDemo">Run demo</button>
       <button id="btnZero">Level here</button>
       <button id="btnSmooth">Smoothing: on</button>
@@ -197,6 +221,12 @@ footer{
   <div class="body">
     <div class="stage">
       <canvas id="view"></canvas>
+      <div class="stagetabs">
+        <button id="tabAtt" class="tab on">Attitude</button>
+        <button id="tabTraj" class="tab">Trajectory</button>
+        <button id="tabPad" class="tab" title="Re-datum the pad on the next fix worth trusting">Set pad</button>
+        <button id="tabClear" class="tab" title="Discard the recorded path">Clear</button>
+      </div>
       <div class="stage-label">Elevation &mdash; live</div>
       <div class="hint" id="hint">
         Close the Arduino Serial Monitor first &mdash; only one program can hold the port.
@@ -227,6 +257,19 @@ footer{
         <div class="row"><span class="k">Altitude</span><span class="v" id="oAlt">0.00 m</span></div>
         <div class="row"><span class="k">Vertical vel</span><span class="v" id="oVel">0.00 m/s</span></div>
         <div class="row"><span class="k">Peak alt</span><span class="v" id="oAltPeak">0.00 m</span></div>
+      </div>
+      <div class="rgroup">
+        <div class="rlabel">High-g &middot; ADXL375</div>
+        <div class="row"><span class="k">|a| high-g</span><span class="v" id="oHg">&mdash;</span></div>
+        <div class="row"><span class="k">Peak high-g</span><span class="v" id="oHgPeak">&mdash;</span></div>
+      </div>
+      <div class="rgroup">
+        <div class="rlabel">GPS &middot; SAM-M8Q</div>
+        <div class="row"><span class="k">Fix</span><span class="v" id="oFix">&mdash;</span></div>
+        <div class="row"><span class="k">Satellites</span><span class="v" id="oSats">&mdash;</span></div>
+        <div class="row"><span class="k">Accuracy</span><span class="v" id="oHacc">&mdash;</span></div>
+        <div class="row"><span class="k">Position</span><span class="v" id="oPos">&mdash;</span></div>
+        <div class="row"><span class="k">From pad</span><span class="v" id="oTrack">&mdash;</span></div>
       </div>
       <div class="rgroup">
         <div class="rlabel">Link</div>
@@ -567,6 +610,11 @@ function drawRocket(M, cx, cy, scale, opts){
 }
 
 function drawScene(){
+  if(stageMode==='traj') return drawTrajectory();
+  return drawAttitude();
+}
+
+function drawAttitude(){
   const [w,h]=fit(view,ctx);
   W=w;H=h;
   ctx.clearRect(0,0,w,h);
@@ -667,7 +715,11 @@ const tel={
   ax:0,ay:0,az:1,gx:0,gy:0,gz:0,alt:0,vel:0,
   aMag:1,gMag:0,aPeak:0,altPeak:0,
   frames:0,bad:0,rate:0,last:0,
-  boardMs:0, usingBoardTime:false
+  boardMs:0, usingBoardTime:false,
+  // Appended wire fields. null = the firmware predates them and sent nothing;
+  // -1 = the firmware sent a value meaning "that part is not fitted". Those
+  // are different states and the display distinguishes them.
+  hg:null, hgPeak:0, fix:null, sats:0, lat:0, lon:0, hacc:null
 };
 let rateWin=[];
 
@@ -700,7 +752,9 @@ function altMedian3(v){
 
 function ingest(parts){
   const n=parts.map(Number);
-  if(n.some(x=>!isFinite(x))) { tel.bad++; return false; }
+  // Returning false is enough -- handleLine counts the rejection. Counting it
+  // here too made every malformed line register as two bad lines.
+  if(n.some(x=>!isFinite(x))) return false;
   const nowPC=performance.now()/1000;
 
   // Prefer the board's clock when the firmware provides it.
@@ -718,6 +772,22 @@ function ingest(parts){
   tel.last=nowPC;
 
   [tel.ax,tel.ay,tel.az,tel.gx,tel.gy,tel.gz,tel.alt,tel.vel]=n;
+
+  // ---- appended fields: high-g and GPS ----
+  tel.hg = (n.length>=10) ? n[9] : null;
+  if(tel.hg!=null && tel.hg>=0 && tel.hg>tel.hgPeak) tel.hgPeak=tel.hg;   // peak stays RAW
+  if(n.length>=14){
+    tel.fix=n[10]; tel.sats=n[11]; tel.lat=n[12]; tel.lon=n[13];
+    // hAcc is the receiver's own horizontal accuracy estimate. Without it a
+    // position cannot be argued with; with it, the datum can be gated.
+    tel.hacc = (n.length>=15) ? n[14] : null;
+    traj.add(tel.alt, tel.fix, tel.lat, tel.lon, tel.hacc, tel.sats, trajStamp());
+  }else{
+    tel.fix=null; tel.hacc=null;
+    // Still record the vertical profile -- altitude is measured whether or
+    // not a GPS is fitted, and it is the only axis of this that is.
+    traj.add(tel.alt, null, 0, 0, null, 0, trajStamp());
+  }
   tel.aMag=Math.hypot(tel.ax,tel.ay,tel.az);
   tel.gMag=Math.hypot(tel.gx,tel.gy,tel.gz);
   tel.aPeak=Math.max(tel.aPeak,tel.aMag);      // peaks stay on RAW
@@ -765,7 +835,10 @@ function handleLine(line){
   if(line.startsWith('V,')){
     const parts=line.slice(2).split(',');
     // 8 fields minimum; a 9th (board millis) is used when present.
-    if(parts.length>=8 && ingest(parts.slice(0,9))) lastFrameAt=performance.now();
+    // Was slice(0,9). The format grew five appended fields; handing the
+    // parser everything lets it use them when present and ignore them when
+    // an older board does not send them.
+    if(parts.length>=8 && ingest(parts)) lastFrameAt=performance.now();
     else tel.bad++;
   }
 }
@@ -775,6 +848,19 @@ function handleLine(line){
    ============================================================ */
 let port=null, reader=null, writer=null, keepReading=false;
 let lastFrameAt=0, connectedAt=0, nagged=false;
+
+/* ---- Telemetry staleness -------------------------------------------------
+   Frames arrive at 25 Hz (40 ms apart), so 1.5 s is roughly 37 missed frames:
+   an outage rather than a hiccup, and short enough to notice before you have
+   walked away from the bench.
+
+   This is deliberately independent of the transport's own error handling. A
+   Server-Sent Events connection stays happily open while the ground station
+   has nothing to forward, so `es.onerror` never fires for a silent radio --
+   the case that matters most. Web Serial is the same: an open port that has
+   gone quiet raises nothing. */
+const STALE_MS = 1500;
+let staleNow = false, lastStaleTick = 0;
 
 /* The sketch toggles its telemetry stream on the character 'v'.
    With the Serial Monitor closed, this page is the only thing that can send it. */
@@ -813,6 +899,7 @@ async function connect(){
     setStatus('Live','live');
     banner.classList.add('hide');
     document.getElementById('btnV').disabled=false;
+    cmdButtonsEnabled(true);
     readLoop();
     // Give the board a moment to finish booting, then ask for the stream.
     setTimeout(()=>sendChar('v'), 1500);
@@ -855,6 +942,7 @@ async function readLoop(){
     if(!demoOn) setStatus('Disconnected');
     document.getElementById('btnConnect').textContent='Connect board';
     document.getElementById('btnV').disabled=true;
+    cmdButtonsEnabled(false);
   }
 }
 
@@ -1010,10 +1098,39 @@ function frame(now){
   }
   if(port && lastFrameAt) banner.classList.add('hide');
 
+  // Staleness. `lastFrameAt` is 0 until the first frame ever arrives, so a
+  // connection that has never produced data is left to the banner above
+  // rather than reported as stale -- those are different faults.
+  const liveSrc = (port) && !demoOn;
+  // !! so this is strictly boolean: `lastFrameAt` is 0 before the first
+  // frame, and a bare 0 here would not compare equal to the false it is
+  // tracked against, flipping state for no reason.
+  // `staleSuppressUntil` covers the commands that deliberately stop the
+  // stream: zeroing the barometer and re-measuring gyro bias both block the
+  // sketch for a second or more while they average. Frames really do stop, so
+  // the flag would be correct -- but crying outage about a pause we asked for
+  // trains people to ignore it, which is worse than not showing it.
+  const isStale = !!(liveSrc && lastFrameAt && (now - lastFrameAt > STALE_MS)
+                     && now > staleSuppressUntil);
+  if(isStale !== staleNow){
+    staleNow = isStale;
+    document.body.classList.toggle('stale', isStale);
+    // Only claim "Live" again if a live source is what we actually have;
+    // otherwise this would stomp on the Demo/Disconnected status.
+    if(!isStale && liveSrc) setStatus('Live','live');
+  }
+  // Throttled so the age counter does not write to the DOM every frame.
+  if(isStale && now - lastStaleTick > 200){
+    lastStaleTick = now;
+    const secs = (now - lastFrameAt) / 1000;
+    setStatus('No data ' + secs.toFixed(secs < 10 ? 1 : 0) + 's', 'stale');
+  }
+
   if(demoOn) demoStep(dt);
   drawScene();
   stripAlt.draw(); stripAcc.draw(); stripTilt.draw();
   ui();
+  uiExtra();
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
@@ -1021,6 +1138,383 @@ requestAnimationFrame(frame);
 if(!('serial' in navigator)){
   showBanner('This browser has no Web Serial, so the board cannot be read here. Chrome or Edge on desktop will work &mdash; meanwhile, <b>Run demo</b> shows the same display with synthetic motion.');
 }
+
+/* ============================================================
+   High-g, GPS, board commands, and the trajectory view
+
+   WIRE FORMAT. Five fields were appended, never inserted, so a parser that
+   reads only the first eight or nine keeps working:
+
+       V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon
+
+   -1 in `hg` or `fix` means the part is not fitted, which is deliberately
+   distinct from a zero reading: 0.00 g is legal in freefall, fix type 0 is a
+   legal "no fix", and 0,0 is a real position in the Gulf of Guinea.
+   ============================================================ */
+
+const FIX_NAMES={'-1':'not fitted',0:'no fix',1:'dead reckoning',
+                 2:'2D',3:'3D',4:'GNSS+DR',5:'time only'};
+
+/* ---- trajectory ---------------------------------------------------------
+   ONLY ONE AXIS OF THIS IS MEASURED, and the drawing says so.
+
+   Altitude is barometric: driftless, ~10 cm noise, honest.
+   Horizontal position is GPS -- and the GPS is blind for the entire flight.
+   It loses lock at launch and takes 5-15 s to reacquire, on a ~10 s flight.
+
+   The IMU cannot fill that gap. The design document already rejects
+   integrating it for VELOCITY: gravity has to be removed in body frame, which
+   needs orientation from a gyro just shocked by 50 g, and a 5 deg attitude
+   error injects 0.85 m/s^2. Position is that same error integrated TWICE --
+   tens of metres over a 3 s coast, with no way to know you are wrong.
+
+   So an unlocked segment is drawn as a dashed gap with the horizontal frozen
+   at the last fix, never interpolated. A smooth arc through the gap would be
+   an invention, and the one thing this view has to be is trustworthy about
+   where the vehicle actually was. */
+const M_PER_DEG_LAT=111320;
+const traj={
+  pts:[], origin:null, cap:4000, lastPush:-1e12, minDt:100,
+
+  /* QUALITY GATE ON THE PAD DATUM.
+     The first fix of a session is the worst one you will ever get: cold start,
+     fewest satellites, worst geometry. Taking it as the origin silently
+     poisons every distance measured from it afterwards, and nothing in the
+     display disagrees, because the fix type reads 3D the whole time.
+     Seen on the bench: a 3D fix on five satellites sat 238 m from where it
+     first locked, on a board that had not moved.
+     So the datum is only ever taken from a fix the receiver itself vouches
+     for -- enough satellites for real geometry, and its own hAcc estimate
+     inside a sane bound. */
+  minSats:6, maxHAcc:10, pendingPad:false,
+
+  reset(){ this.pts.length=0; this.origin=null; this.lastPush=-1e12; },
+  setPad(){ this.pendingPad=true; },   // re-datum on the next fix worth trusting
+
+  trusted(fix,sats,hacc){
+    return fix!=null && fix>=2 && sats>=this.minSats
+        && hacc!=null && hacc>=0 && hacc<=this.maxHAcc;
+  },
+
+  /* `nowMs` is the BOARD's clock when the firmware sends one, not this
+     machine's. USB and radio both deliver in bursts -- several frames land
+     microseconds apart, then a gap -- so throttling on arrival time samples
+     the path uncontrollably unevenly and collapses whole bursts into one
+     point. The board timestamp exists precisely to make arrival jitter
+     harmless; using it here keeps the path evenly sampled in vehicle time. */
+  add(alt,fix,lat,lon,hacc,sats,nowMs){
+    if(nowMs-this.lastPush < this.minDt) return;   // 10 Hz is plenty for a path
+    this.lastPush=nowMs;
+
+    const hasFix = fix!=null && fix>=2 && (lat!==0 || lon!==0);
+    const good   = hasFix && this.trusted(fix,sats,hacc);
+
+    if(good && (!this.origin || this.pendingPad)){
+      const redatum = !!this.origin;
+      this.origin={lat:lat,lon:lon};
+      this.pendingPad=false;
+      // Points recorded against the old datum live in the old frame; keeping
+      // them would draw a step the vehicle never took.
+      if(redatum) this.pts.length=0;
+    }
+
+    let x=0,y=0,locked=false,poor=false;
+    if(hasFix && this.origin){
+      // Equirectangular about the datum. Exact enough by orders of magnitude
+      // at the scale of a launch site.
+      const s=Math.cos(this.origin.lat*Math.PI/180);
+      x=(lon-this.origin.lon)*M_PER_DEG_LAT*s;     // east, metres
+      y=(lat-this.origin.lat)*M_PER_DEG_LAT;       // north, metres
+      locked=true;
+      // A fix we have, but not one the receiver stands behind.
+      poor=!this.trusted(fix,sats,hacc);
+    }else if(this.pts.length){
+      const p=this.pts[this.pts.length-1];
+      x=p.x; y=p.y;                                // frozen, and flagged unlocked
+    }
+    this.pts.push({x:x,y:y,z:alt,locked:locked,poor:poor});
+    if(this.pts.length>this.cap) this.pts.shift();
+  },
+  ground(){
+    if(!this.pts.length || !this.origin) return null;
+    const p=this.pts[this.pts.length-1];
+    return Math.hypot(p.x,p.y);
+  }
+};
+
+/* Board clock when the firmware provides one, wall clock otherwise. */
+function trajStamp(){
+  return (tel.usingBoardTime && isFinite(tel.boardMs)) ? tel.boardMs : performance.now();
+}
+
+let stageMode='attitude';
+let trajAz=-0.7, trajEl=0.42, trajDrag=null;
+let staleSuppressUntil=0;
+
+function niceStep(x){
+  if(!(x>0)) return 1;
+  const e=Math.pow(10,Math.floor(Math.log10(x))), m=x/e;
+  return (m<1.5?1:m<3.5?2:m<7.5?5:10)*e;
+}
+
+function drawTrajectory(){
+  const [w,h]=fit(view,ctx);
+  ctx.clearRect(0,0,w,h);
+  const pts=traj.pts;
+
+  let minX=0,maxX=0,minY=0,maxY=0,maxZ=0;
+  for(const p of pts){
+    if(p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
+    if(p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
+    if(p.z>maxZ)maxZ=p.z;
+  }
+  const cX=(minX+maxX)/2, cY=(minY+maxY)/2;
+  const span=Math.max(maxX-minX, maxY-minY, maxZ, 10)*1.15;
+
+  // Orbiting camera, auto-framed on the data. Its own projection rather than
+  // the attitude view's fixed one, because a path spans metres to kilometres
+  // while the rocket model never changes size.
+  const R=span*2.2;
+  const E=[cX+R*Math.cos(trajEl)*Math.cos(trajAz),
+           cY+R*Math.cos(trajEl)*Math.sin(trajAz),
+           maxZ*0.45+R*Math.sin(trajEl)];
+  const T=[cX,cY,maxZ*0.35];
+  const f=v3.norm(v3.sub(T,E));
+  const r=v3.norm(v3.cross(f,[0,0,1]));
+  const u=v3.cross(r,f);
+  const cx=w*0.5, cy=h*0.55, sc=Math.min(w,h)*0.62;
+  const P=function(p){
+    const d=v3.sub(p,E), z=v3.dot(d,f);
+    if(z<0.05) return null;
+    return {x:cx+v3.dot(d,r)*FOCAL/z*sc, y:cy-v3.dot(d,u)*FOCAL/z*sc, z:z};
+  };
+
+  /* ground plane grid */
+  const step=niceStep(span/5);
+  const g0=Math.floor((cX-span/2)/step)*step, g1=Math.ceil((cX+span/2)/step)*step;
+  const h0=Math.floor((cY-span/2)/step)*step, h1=Math.ceil((cY+span/2)/step)*step;
+  ctx.save();
+  ctx.strokeStyle='rgba(23,28,25,.14)'; ctx.lineWidth=1;
+  for(let gx=g0; gx<=g1+1e-6; gx+=step){
+    const a=P([gx,h0,0]), b=P([gx,h1,0]);
+    if(a&&b){ ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+  }
+  for(let gy=h0; gy<=h1+1e-6; gy+=step){
+    const a=P([g0,gy,0]), b=P([g1,gy,0]);
+    if(a&&b){ ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke(); }
+  }
+  ctx.restore();
+
+  /* the pad */
+  if(traj.origin){
+    const o=P([0,0,0]);
+    if(o){
+      ctx.save();
+      ctx.strokeStyle='rgba(35,80,140,.85)'; ctx.lineWidth=1.4;
+      ctx.beginPath(); ctx.arc(o.x,o.y,5,0,Math.PI*2); ctx.stroke();
+      ctx.fillStyle='rgba(35,80,140,.8)';
+      ctx.font='10px ui-monospace,SFMono-Regular,Menlo,monospace';
+      ctx.fillText('pad', o.x+8, o.y+3);
+      ctx.restore();
+    }
+  }
+
+  if(pts.length<2){
+    ctx.save();
+    ctx.fillStyle='rgba(23,28,25,.5)';
+    ctx.font='12px ui-monospace,SFMono-Regular,Menlo,monospace';
+    ctx.textAlign='center';
+    ctx.fillText('waiting for telemetry', w/2, h*0.5);
+    ctx.font='11px ui-monospace,SFMono-Regular,Menlo,monospace';
+    ctx.fillText('altitude is measured — horizontal needs a GPS fix', w/2, h*0.5+18);
+    ctx.restore();
+    drawTrajLegend(w,h,step);
+    return;
+  }
+
+  /* Path. Locked and unlocked are separate passes so the dashing is
+     unambiguous -- a reader must never have to guess which parts of this
+     line were actually measured. */
+  const scr=pts.map(function(p){ return P([p.x,p.y,p.z]); });
+  ctx.save();
+  ctx.lineJoin='round'; ctx.lineCap='round';
+
+  ctx.strokeStyle='rgba(192,57,43,.6)'; ctx.lineWidth=1.4; ctx.setLineDash([4,4]);
+  ctx.beginPath();
+  let pen=false;
+  for(let i=1;i<pts.length;i++){
+    const a=scr[i-1], b=scr[i];
+    if(!a||!b||(pts[i].locked&&pts[i-1].locked)){ pen=false; continue; }
+    if(!pen){ ctx.moveTo(a.x,a.y); pen=true; }
+    ctx.lineTo(b.x,b.y);
+  }
+  ctx.stroke();
+
+  /* Locked, but on a fix the receiver does not stand behind. Drawn weakly:
+     dropping it would hide that the vehicle was somewhere, and drawing it at
+     full strength would overstate how well we know where. */
+  ctx.setLineDash([]);
+  ctx.strokeStyle='rgba(35,80,140,.28)'; ctx.lineWidth=1.2;
+  ctx.beginPath(); pen=false;
+  for(let i=1;i<pts.length;i++){
+    const a=scr[i-1], b=scr[i];
+    if(!a||!b||!(pts[i].locked&&pts[i-1].locked)
+       ||!(pts[i].poor||pts[i-1].poor)){ pen=false; continue; }
+    if(!pen){ ctx.moveTo(a.x,a.y); pen=true; }
+    ctx.lineTo(b.x,b.y);
+  }
+  ctx.stroke();
+
+  ctx.strokeStyle='#23508C'; ctx.lineWidth=1.8;
+  ctx.beginPath(); pen=false;
+  for(let i=1;i<pts.length;i++){
+    const a=scr[i-1], b=scr[i];
+    if(!a||!b||!(pts[i].locked&&pts[i-1].locked)
+       ||pts[i].poor||pts[i-1].poor){ pen=false; continue; }
+    if(!pen){ ctx.moveTo(a.x,a.y); pen=true; }
+    ctx.lineTo(b.x,b.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  /* current point, with a drop line so height is readable against the grid */
+  const last=pts[pts.length-1], pc=scr[scr.length-1], pg=P([last.x,last.y,0]);
+  if(pc&&pg){
+    ctx.save();
+    ctx.strokeStyle='rgba(23,28,25,.3)'; ctx.lineWidth=1; ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.moveTo(pc.x,pc.y); ctx.lineTo(pg.x,pg.y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = !last.locked ? '#C0392B'
+                  : (last.poor ? 'rgba(35,80,140,.45)' : '#23508C');
+    ctx.beginPath(); ctx.arc(pc.x,pc.y,4.5,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+
+  drawTrajLegend(w,h,step);
+}
+
+function drawTrajLegend(w,h,step){
+  const pts=traj.pts;
+  const alt=pts.length?pts[pts.length-1].z:0;
+  const gnd=traj.ground();
+  let unlocked=0, poor=0;
+  for(const p of pts){ if(!p.locked) unlocked++; else if(p.poor) poor++; }
+
+  ctx.save();
+  ctx.font='10px ui-monospace,SFMono-Regular,Menlo,monospace';
+  ctx.fillStyle='rgba(23,28,25,.62)';
+  const L=['grid '+(step>=1000?(step/1000)+' km':step+' m'),
+           'alt '+alt.toFixed(1)+' m  (measured)',
+           traj.origin==null
+             ? 'no pad datum yet — needs '+traj.minSats+'+ sats and \u00B1'+traj.maxHAcc+' m'
+             : (gnd==null?'ground —':'ground '+gnd.toFixed(1)+' m from pad')];
+  if(traj.pendingPad) L.push('set pad: waiting for a fix worth trusting');
+  if(unlocked) L.push('dashed red = no GPS lock, horizontal frozen');
+  if(poor) L.push('faded blue = fix worse than \u00B1'+traj.maxHAcc+' m');
+  for(let i=0;i<L.length;i++) ctx.fillText(L[i], 12, h-12-(L.length-1-i)*13);
+  ctx.textAlign='right';
+  ctx.fillText('drag to orbit', w-12, h-12);
+  ctx.restore();
+}
+
+/* ---- stage tabs --------------------------------------------------------- */
+function setStage(mode){
+  stageMode=mode;
+  const a=document.getElementById('tabAtt'), t=document.getElementById('tabTraj');
+  if(a) a.classList.toggle('on', mode==='attitude');
+  if(t) t.classList.toggle('on', mode==='traj');
+  const lab=document.querySelector('.stage-label');
+  if(lab) lab.innerHTML = (mode==='traj')
+    ? 'Trajectory &mdash; altitude measured, horizontal from GPS'
+    : 'Elevation &mdash; live';
+  // The dual-transport build caches canvas sizes and needs them invalidated on
+  // a layout change; the serial build re-measures every frame and has no such
+  // function. Guarded rather than duplicated, so the two builds stay mergeable.
+  if(typeof invalidateSizes==='function') invalidateSizes();
+}
+(function(){
+  const a=document.getElementById('tabAtt'), t=document.getElementById('tabTraj'),
+        c=document.getElementById('tabClear');
+  if(a) a.addEventListener('click', function(){ setStage('attitude'); });
+  if(t) t.addEventListener('click', function(){ setStage('traj'); });
+  if(c) c.addEventListener('click', function(){ traj.reset(); });
+  const pd=document.getElementById('tabPad');
+  if(pd) pd.addEventListener('click', function(){ traj.setPad(); });
+
+  /* Drag to orbit. Only while the trajectory tab is up, so the attitude view
+     keeps its fixed camera. */
+  view.addEventListener('pointerdown', function(e){
+    if(stageMode!=='traj') return;
+    trajDrag={x:e.clientX,y:e.clientY,az:trajAz,el:trajEl};
+    try{ view.setPointerCapture(e.pointerId); }catch(err){}
+  });
+  view.addEventListener('pointermove', function(e){
+    if(!trajDrag) return;
+    trajAz = trajDrag.az - (e.clientX-trajDrag.x)*0.006;
+    trajEl = Math.max(-0.25, Math.min(1.45, trajDrag.el + (e.clientY-trajDrag.y)*0.005));
+  });
+  addEventListener('pointerup', function(){ trajDrag=null; });
+})();
+
+/* ---- extra readouts ----------------------------------------------------- */
+const _xe={};
+function _xput(id,txt){
+  const el=_xe[id]||(_xe[id]=document.getElementById(id));
+  if(el && el.textContent!==txt) el.textContent=txt;
+}
+function uiExtra(){
+  if(tel.hg==null)     _xput('oHg','no data');
+  else if(tel.hg<0)    _xput('oHg','not fitted');
+  else                 _xput('oHg', tel.hg.toFixed(2)+' g');
+  _xput('oHgPeak', tel.hgPeak>0 ? tel.hgPeak.toFixed(2)+' g' : '—');
+
+  if(tel.fix==null){
+    _xput('oFix','no data'); _xput('oSats','—'); _xput('oPos','—');
+  }else{
+    _xput('oFix', FIX_NAMES[String(tel.fix)] || String(tel.fix));
+    _xput('oSats', tel.fix<0 ? '—' : String(tel.sats));
+    _xput('oPos', tel.fix>=2 ? tel.lat.toFixed(6)+', '+tel.lon.toFixed(6) : '—');
+  }
+  _xput('oHacc', (tel.hacc==null || tel.hacc<0) ? '—'
+                : '\u00B1'+tel.hacc.toFixed(1)+' m');
+  // "no pad datum" is a different statement from "0 m from the pad", and the
+  // difference is the whole point of the gate.
+  const gnd=traj.ground();
+  _xput('oTrack', traj.origin==null ? 'no datum'
+                : (gnd==null ? '—' : gnd.toFixed(1)+' m'));
+}
+
+/* ---- board commands -----------------------------------------------------
+   These exist only over Web Serial. SSE is one-way, so when this page is
+   served by the ground station there is no back-channel to the flight
+   computer at all -- the buttons carry the serial-only class for that reason.
+   It is a transport limitation, not an oversight.
+
+   `c` (CSV) and `h` (reprint header) are deliberately NOT exposed: both would
+   corrupt the telemetry stream this page is reading. */
+const CMD_BTNS=[['cmdZ','z',3000],['cmdB','b',3500],['cmdR','r',0],['cmdG','g',0]];
+function cmdButtonsEnabled(on){
+  for(let i=0;i<CMD_BTNS.length;i++){
+    const el=document.getElementById(CMD_BTNS[i][0]);
+    if(el) el.disabled=!on;
+  }
+}
+(function(){
+  for(let i=0;i<CMD_BTNS.length;i++){
+    const id=CMD_BTNS[i][0], ch=CMD_BTNS[i][1], blockMs=CMD_BTNS[i][2];
+    const el=document.getElementById(id);
+    if(!el) continue;
+    el.addEventListener('click', function(){
+      Promise.resolve(sendChar(ch)).then(function(ok){
+        if(!ok) return;
+        if(blockMs) staleSuppressUntil=performance.now()+blockMs;
+        if(ch==='r'){        // match the board: clear the display's peaks too
+          tel.aPeak=0; tel.altPeak=0; tel.hgPeak=0;
+        }
+      });
+    });
+  }
+})();
 </script>
 </body>
 </html>
