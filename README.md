@@ -1,1 +1,151 @@
-# MAARE-Avionics-System
+# MAARE Avionics System
+
+Student-designed and student-researched (SRAD) flight computer for a water
+pressure rocket. The vehicle is a testbed; **the avionics are the deliverable.**
+
+Mapúa University (Intramuros).
+
+---
+
+## Status: v0.1 — work in progress
+
+Early. **Two sensors are on the flight computer** and the ground segment works
+on synthetic data. Everything else in this repository is **design intent, not
+built hardware.**
+
+| Item | State |
+|---|---|
+| MS5611 barometer | Wired to the flight Pico, reading |
+| MinIMU-9 v6 board | Wired; LSM6DSO (accel/gyro) reading. LIS3MDL magnetometer not read by the current sketch |
+| Bench diagnostics (`rocket_diagnostics.ino`) | Working on hardware |
+| Pico W ground station + viewer | Working — **synthetic telemetry only** |
+| ADXL375 high-g | Not connected |
+| SAM-M8Q GPS | Not connected |
+| RFM95W LoRa ×2 | Not connected — no radio link exists |
+| MG90D servo, latch, deployment | Not connected, not built |
+| Reed switch arming interlock | Not connected |
+| LS3040 buzzer | Not connected |
+| Airframe | Not built |
+| `rocket_flight.ino` | **Not written** |
+
+The design document is deliberately ahead of the hardware — that is its job.
+Read it as a specification, not a description. `avionics_status_report.md`
+tracks where the build has got to.
+
+---
+
+## What this is
+
+A water rocket's flight envelope is hostile in the ways that matter — 20–100 g
+boost, sub-second burn, ~10 second total flight, a wet landing — while carrying
+no propellant hazard and no regulatory burden. Every subsystem here (deployment
+state machine, static ports, telemetry link, arming interlock) transfers
+unchanged to a motor-powered vehicle. The consequence of a failure is a plastic
+bottle, not a motor CATO.
+
+**Objectives:** log full-rate flight data through a complete flight;
+autonomously detect apogee and actuate parachute deployment; transmit live
+telemetry and act as a recovery beacon after landing; build team competency
+that transfers directly to high-power rocketry.
+
+## Start here
+
+**[`avionics_documentation.md`](avionics_documentation.md)** — the design
+document and the authority for this project. Everything else is
+either a companion spec or an implementation of something it specifies. If two
+documents disagree, that one wins.
+
+## Repository layout
+
+| Path | What it is |
+|---|---|
+| [`avionics_documentation.md`](avionics_documentation.md) | **Design document.** Sensors, deployment logic, radio, power, recovery, firmware, regulatory, test plan |
+| [`hardware_reference.md`](hardware_reference.md) | Quick bench reference — pin map, I²C addresses, driver gotchas, bring-up order |
+| [`airframe_build_spec.md`](airframe_build_spec.md) | Airframe structure, materials, dimensions, assembly sequence |
+| [`avionics_status_report.md`](avionics_status_report.md) | Project status summary |
+| `water_rocket_avionics_bom.xlsx` | Bill of materials — costs, suppliers, phasing, per-part justification |
+| `rocket_diagnostics.ino` | Bench diagnostics sketch (verified working on hardware) |
+| `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Web Serial over USB, or SSE over Wi-Fi |
+| `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer — the bench path that works today |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each version |
+| [`pico_w_ground_station/`](pico_w_ground_station/) | Ground station firmware (MicroPython) + the viewer as deployed |
+| `rocket_assembly_viewer.jsx` | Interactive 3D assembly and separation-sequence visualiser |
+
+## Hardware
+
+| Subsystem | Component |
+|---|---|
+| Compute (flight) | Raspberry Pi Pico (RP2040), official Arduino Mbed OS core |
+| Compute (ground) | Raspberry Pi Pico W, MicroPython |
+| Altitude | MS5611 (GY-63) — primary altimeter and apogee trigger |
+| Attitude | Pololu MinIMU-9 v6 (LSM6DSO + LIS3MDL) |
+| Boost accel | Adafruit ADXL375 (±200 g) |
+| Position | SparkFun SAM-M8Q (u-blox, multi-GNSS incl. QZSS) |
+| Radio | 2× RFM95W (SX1276) LoRa, 868–870 MHz at ≤ +14 dBm |
+| Deployment | MG90D servo, pin latch in double shear |
+| Arming | Reed switch + N35 magnet |
+| Power | 500 mAh 1S LiPo direct to VSYS |
+
+~80 g, ~80–90 mA, roughly 5 hours of pad endurance.
+
+> This is the **designed** stack. Only the MS5611 and the MinIMU-9 are
+> currently connected — see [Status](#status-v01--work-in-progress).
+
+## What the limitations actually are
+
+Beyond the not-yet-connected hardware above, these are the things that would
+still be true once everything is wired:
+
+- **The deployment code has never flown.** This is the principal risk and the
+  deliberate trade for SRAD capability. Serious teams often fly a commercial
+  altimeter as primary deployment alongside SRAD logging.
+- **The tilt inhibit is specified but not implemented.** The attitude filter
+  runs ground-side only and has not been ported to flight firmware.
+- **Attitude filter numbers are from synthetic tests**, not flight data. They
+  establish that the algorithm is correct, not that it survives a 50 g boost.
+- **The gyro saturates at ±2000 dps** (~333 RPM). A spinning vehicle exceeds
+  this and the attitude estimate becomes unrecoverable, not merely noisy.
+- **Yaw is unobservable** without magnetometer calibration, so the
+  roll-about-vertical readout drifts. Tilt is unaffected.
+
+§14 of the design document keeps the full list.
+
+## Two silent failure modes on this platform
+
+Both look like something other than what they are, which is what makes them
+worth knowing before you meet them:
+
+- The **MS5611 can report itself absent while working perfectly.** A
+  zero-length I²C `endTransmission()` on Mbed cores issues a read-type
+  transaction the sensor won't ACK, so detection fails on a healthy part.
+- The **gyro can report every rate 4× too high** while merely looking
+  "unstable." `enableDefault()` selects ±245 dps, not the ±1000 dps that the
+  commonly-copied `0.035` dps/LSB constant assumes.
+
+Neither announces itself as a configuration error. The structural response —
+**read configuration back from the hardware and print it at boot** — is cheap,
+and is the standing expectation for any new device on this bus.
+
+## Safety
+
+This vehicle is pressurised to 100 psi and deploys a parachute under stored
+spring energy.
+
+- **Arm last, disarm first.** The reed interlock exists precisely so that
+  ground handling cannot fire the latch while someone's hands are in the bay.
+- **Never key the LoRa transmitter without an antenna attached** — it damages
+  the PA.
+- Pressure-test the bulkhead in isolation, and leak-test the airframe at full
+  pressure, away from anyone's face, before trusting either.
+- Flight test progression is sequenced deliberately: airframe only, then
+  avionics logging-only, then deployment enabled — and only after offline
+  analysis confirms the apogee detector *would have* fired correctly on logged
+  flights.
+
+## Regulatory
+
+LoRa telemetry operates at **868.000–870.000 MHz, ≤ +14 dBm (25 mW erp)** per
+NTC MC 03-06-2017 (Philippine non-specific SRD allocation) — deliberately not
+the US 915 MHz default. NTC MC 004-06-2026 amended SRD parameters in June 2026;
+**re-check current circulars before any RF-active flight.** §12 has the detail
+and is explicit that it is not authoritative.

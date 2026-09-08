@@ -1,0 +1,13 @@
+# Normalise line endings in the repository; check out native on each platform.
+* text=auto
+
+# Source that should always be LF in the repo
+*.md   text eol=lf
+*.txt  text eol=lf
+*.py   text eol=lf
+*.ino  text eol=lf
+*.html text eol=lf
+*.jsx  text eol=lf
+
+# Binary — never touch, never diff as text
+*.xlsx binary

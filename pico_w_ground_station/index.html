@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Attitude Bench — MS5611 / LSM6</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#E6E8E1;
+  --paper-2:#DCDFD6;
+  --paper-3:#D0D4C9;
+  --ink:#171C19;
+  --rule:#A9B0A6;
+  --rule-soft:#C2C7BC;
+  --blue:#23508C;
+  --blue-soft:#7D9CC4;
+  --red:#C0392B;
+  --amber:#9A6206;
+  --ok:#3F6B45;
+
+  --f-disp:"Archivo Narrow",  "Arial Narrow", system-ui, sans-serif;
+  --f-mono:"IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--f-mono);
+  font-size:13px;
+  /* faint drafting grid */
+  background-image:
+    linear-gradient(to right, rgba(23,28,25,.045) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(23,28,25,.045) 1px, transparent 1px);
+  background-size:22px 22px;
+}
+
+.sheet{
+  max-width:1180px;
+  margin:0 auto;
+  min-height:100%;
+  border-left:1px solid var(--rule);
+  border-right:1px solid var(--rule);
+  background:
+    linear-gradient(rgba(230,232,225,.86), rgba(230,232,225,.86));
+  display:flex;
+  flex-direction:column;
+}
+
+/* ---------- title block ---------- */
+header{
+  border-bottom:2px solid var(--ink);
+  padding:14px 20px 10px;
+  display:flex;
+  align-items:flex-end;
+  gap:24px;
+  flex-wrap:wrap;
+}
+h1{
+  font-family:var(--f-disp);
+  font-weight:700;
+  font-size:30px;
+  letter-spacing:.06em;
+  text-transform:uppercase;
+  margin:0;
+  line-height:.95;
+}
+.subtitle{
+  font-size:11px;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  color:#5C665F;
+  margin-top:5px;
+}
+.titleblock{flex:1 1 320px}
+.controls{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+button{
+  font-family:var(--f-disp);
+  font-size:14px;
+  font-weight:600;
+  letter-spacing:.1em;
+  text-transform:uppercase;
+  padding:8px 14px;
+  background:var(--paper-2);
+  color:var(--ink);
+  border:1px solid var(--ink);
+  border-radius:0;
+  cursor:pointer;
+  box-shadow:2px 2px 0 var(--rule);
+  transition:transform .06s, box-shadow .06s, background .12s;
+}
+button:hover{background:var(--paper-3)}
+button:active{transform:translate(2px,2px);box-shadow:0 0 0 var(--rule)}
+button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+select{
+  font-family:var(--f-disp);font-size:13px;font-weight:600;letter-spacing:.08em;
+  text-transform:uppercase;padding:8px 10px;background:var(--paper-2);
+  color:var(--ink);border:1px solid var(--ink);border-radius:0;cursor:pointer;
+  box-shadow:2px 2px 0 var(--rule);
+}
+select:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+button.primary{background:var(--blue);color:#F2F4EF;border-color:var(--blue)}
+button.primary:hover{background:#1B406F}
+button[disabled]{opacity:.4;cursor:not-allowed;box-shadow:none}
+
+.status{
+  font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+  display:flex;align-items:center;gap:7px;
+  padding-left:4px;
+}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--rule);border:1px solid var(--ink)}
+.dot.live{background:var(--ok)}
+.dot.demo{background:var(--amber)}
+.dot.err{background:var(--red)}
+
+/* ---------- main split ---------- */
+.body{display:grid;grid-template-columns:1fr 268px;flex:1;min-height:0}
+@media (max-width:820px){ .body{grid-template-columns:1fr} }
+
+.stage{position:relative;border-right:1px solid var(--rule);min-height:440px}
+@media (max-width:820px){ .stage{border-right:none;border-bottom:1px solid var(--rule)} }
+#view{display:block;width:100%;height:100%}
+
+.stage-label{
+  position:absolute;left:14px;top:12px;
+  font-family:var(--f-disp);font-size:11px;letter-spacing:.18em;
+  text-transform:uppercase;color:#5C665F;pointer-events:none;
+}
+.hint{
+  position:absolute;left:14px;bottom:12px;right:14px;
+  font-size:11px;color:#5C665F;line-height:1.5;pointer-events:none;
+}
+.hint code{background:var(--paper-3);padding:1px 5px;border:1px solid var(--rule-soft)}
+
+/* ---------- readout column ---------- */
+.readouts{display:flex;flex-direction:column}
+.rgroup{border-bottom:1px solid var(--rule);padding:12px 16px}
+.rgroup:last-child{border-bottom:none}
+.rlabel{
+  font-family:var(--f-disp);font-size:10px;letter-spacing:.18em;
+  text-transform:uppercase;color:#5C665F;margin-bottom:4px;
+}
+.big{font-size:38px;font-weight:600;line-height:1;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.big .u{font-size:14px;font-weight:400;color:#5C665F;margin-left:4px;letter-spacing:0}
+.row{display:flex;justify-content:space-between;align-items:baseline;padding:2px 0;font-variant-numeric:tabular-nums}
+.row .k{color:#5C665F;font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+.row .v{font-size:15px;font-weight:500}
+.warn{color:var(--red)}
+
+/* ---------- strip charts ---------- */
+.charts{border-top:2px solid var(--ink);display:grid;grid-template-columns:repeat(3,1fr)}
+@media (max-width:820px){ .charts{grid-template-columns:1fr} }
+
+/* ---------- phone ----------
+   The ground station is meant to be read on a phone at the pad, so below
+   ~560px the readouts become a two-column grid instead of one long column,
+   the stage shrinks, and the charts sit side by side. Without this the page
+   is several screens tall and you cannot see the model and the numbers at
+   the same time. */
+@media (max-width:560px){
+  body{font-size:12px}
+  header{padding:10px 12px 8px;gap:10px}
+  h1{font-size:22px}
+  .subtitle{font-size:10px;letter-spacing:.12em}
+  .controls{gap:6px;width:100%}
+  button,select{
+    font-size:12px;padding:7px 10px;box-shadow:1px 1px 0 var(--rule);
+    flex:1 1 auto;min-width:0;
+  }
+  select{
+    font-family:var(--f-disp);text-transform:uppercase;letter-spacing:.08em;
+    background:var(--paper-2);border:1px solid var(--ink);border-radius:0;
+    color:var(--ink);
+  }
+  .status{width:100%;padding-left:0;font-size:10px}
+
+  .sheet{border-left:none;border-right:none}
+  .stage{min-height:300px}
+  .stage-label{font-size:9px;top:8px;left:10px}
+  .hint{font-size:10px;left:10px;right:10px;bottom:8px;line-height:1.4}
+
+  /* readouts: two columns so the numbers fit on one screen */
+  .readouts{
+    display:grid;grid-template-columns:1fr 1fr;
+  }
+  .rgroup{
+    border-bottom:1px solid var(--rule);
+    border-right:1px solid var(--rule);
+    padding:9px 11px;
+  }
+  .rgroup:nth-child(2n){border-right:none}
+  .rgroup:first-child{grid-column:1 / -1;border-right:none}
+  .big{font-size:30px}
+  .big .u{font-size:11px}
+  .row .k{font-size:9px;letter-spacing:.05em}
+  .row .v{font-size:13px}
+
+  .charts{grid-template-columns:1fr 1fr}
+  .chart{padding:7px 9px 5px}
+  .chart:nth-child(3){grid-column:1 / -1;border-right:none}
+  .chart canvas{height:44px}
+  .chead .n{font-size:9px;letter-spacing:.1em}
+  .chead .cur{font-size:11px}
+  footer{font-size:9px;padding:5px 10px}
+  .banner{padding:7px 12px;font-size:11px}
+}
+.chart{border-right:1px solid var(--rule);padding:9px 12px 6px}
+.chart:last-child{border-right:none}
+.chead{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px}
+.chead .n{font-family:var(--f-disp);font-size:10px;letter-spacing:.18em;text-transform:uppercase;color:#5C665F}
+.chead .cur{font-size:13px;font-weight:600;font-variant-numeric:tabular-nums}
+.chart canvas{display:block;width:100%;height:52px}
+
+/* ---------- footer raw feed ---------- */
+footer{
+  border-top:1px solid var(--rule);
+  padding:6px 16px;
+  font-size:11px;color:#5C665F;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  min-height:26px;
+}
+
+.banner{
+  background:var(--paper-3);
+  border-bottom:1px solid var(--rule);
+  padding:9px 20px;font-size:12px;line-height:1.5;
+}
+.banner b{color:var(--red)}
+.banner.hide{display:none}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <header>
+    <div class="titleblock">
+      <h1>Attitude Bench</h1>
+      <div class="subtitle" id="subtitle">MS5611 &middot; LSM6 &middot; live orientation from serial</div>
+    </div>
+    <div class="controls">
+      <button id="btnConnect" class="primary serial-only">Connect board</button>
+      <button id="btnV" disabled class="serial-only">Toggle stream</button>
+      <button id="btnDemo" class="serial-only">Run demo</button>
+      <button id="btnNet" class="primary net-only" style="display:none">Reconnect</button>
+      <select id="selMode" class="net-only" style="display:none">
+        <option value="bench">Bench wobble</option>
+        <option value="flight">Flight profile</option>
+        <option value="still">Hold still</option>
+      </select>
+      <button id="btnZero">Level here</button>
+      <button id="btnSmooth">Smoothing: on</button>
+      <div class="status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></div>
+    </div>
+  </header>
+
+  <div class="banner hide" id="banner"></div>
+
+  <div class="body">
+    <div class="stage">
+      <canvas id="view"></canvas>
+      <div class="stage-label">Elevation &mdash; live</div>
+      <div class="hint" id="hint">
+        <span id="hintSerial">Close the Arduino Serial Monitor first &mdash; only one program can hold the port.
+        Connecting sends <code>v</code> automatically; <code>Toggle stream</code> sends it again.</span>
+        <span id="hintNet" style="display:none">Streaming from the ground station over Wi-Fi.
+        Telemetry is <b>synthetic</b> until the radio link is wired in.</span>
+      </div>
+    </div>
+
+    <div class="readouts">
+      <div class="rgroup">
+        <div class="rlabel">Tilt from vertical</div>
+        <div class="big" id="oTilt">0.0<span class="u">deg</span></div>
+      </div>
+      <div class="rgroup">
+        <div class="rlabel">Attitude</div>
+        <div class="row"><span class="k">Roll</span><span class="v" id="oRoll">0&deg;</span></div>
+        <div class="row"><span class="k">Roll rate</span><span class="v" id="oRollRate">0 dps</span></div>
+        <div class="row"><span class="k">Rate mag</span><span class="v" id="oGyro">0 dps</span></div>
+        <div class="row"><span class="k">Est. bias</span><span class="v" id="oBias">0.00 dps</span></div>
+      </div>
+      <div class="rgroup">
+        <div class="rlabel">Accelerometer</div>
+        <div class="row"><span class="k">|a|</span><span class="v" id="oAmag">1.00 g</span></div>
+        <div class="row"><span class="k">ax / ay / az</span><span class="v" id="oAxes">0 / 0 / 0</span></div>
+        <div class="row"><span class="k">Peak |a|</span><span class="v" id="oApeak">0.00 g</span></div>
+      </div>
+      <div class="rgroup">
+        <div class="rlabel">Barometer</div>
+        <div class="row"><span class="k">Altitude</span><span class="v" id="oAlt">0.00 m</span></div>
+        <div class="row"><span class="k">Vertical vel</span><span class="v" id="oVel">0.00 m/s</span></div>
+        <div class="row"><span class="k">Peak alt</span><span class="v" id="oAltPeak">0.00 m</span></div>
+      </div>
+      <div class="rgroup">
+        <div class="rlabel">Link</div>
+        <div class="row"><span class="k">Rate</span><span class="v" id="oRate">0 Hz</span></div>
+        <div class="row"><span class="k">Frames</span><span class="v" id="oFrames">0</span></div>
+        <div class="row"><span class="k">Bad lines</span><span class="v" id="oBad">0</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="charts">
+    <div class="chart">
+      <div class="chead"><span class="n">Altitude &middot; m</span><span class="cur" id="cAlt">0.00</span></div>
+      <canvas id="chAlt"></canvas>
+    </div>
+    <div class="chart">
+      <div class="chead"><span class="n">Accel &middot; g</span><span class="cur" id="cAcc">1.00</span></div>
+      <canvas id="chAcc"></canvas>
+    </div>
+    <div class="chart">
+      <div class="chead"><span class="n">Tilt &middot; deg</span><span class="cur" id="cTilt">0.0</span></div>
+      <canvas id="chTilt"></canvas>
+    </div>
+  </div>
+
+  <footer id="raw">Waiting for data&hellip;</footer>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================
+   1. Small math helpers — quaternions and 3-vectors
+   ============================================================ */
+const v3 = {
+  sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+  cross:(a,b)=>[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]],
+  dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+  len:a=>Math.hypot(a[0],a[1],a[2]),
+  norm(a){const l=this.len(a); return l>1e-9?[a[0]/l,a[1]/l,a[2]/l]:[0,0,0];}
+};
+
+function qMul(a,b){
+  return [
+    a[0]*b[0]-a[1]*b[1]-a[2]*b[2]-a[3]*b[3],
+    a[0]*b[1]+a[1]*b[0]+a[2]*b[3]-a[3]*b[2],
+    a[0]*b[2]-a[1]*b[3]+a[2]*b[0]+a[3]*b[1],
+    a[0]*b[3]+a[1]*b[2]-a[2]*b[1]+a[3]*b[0]
+  ];
+}
+function qNorm(q){
+  const l=Math.hypot(q[0],q[1],q[2],q[3])||1;
+  return [q[0]/l,q[1]/l,q[2]/l,q[3]/l];
+}
+/* rotation matrix, body -> world */
+function qToM(q){
+  const [w,x,y,z]=q;
+  return [
+    [1-2*(y*y+z*z), 2*(x*y-w*z),   2*(x*z+w*y)],
+    [2*(x*y+w*z),   1-2*(x*x+z*z), 2*(y*z-w*x)],
+    [2*(x*z-w*y),   2*(y*z+w*x),   1-2*(x*x+y*y)]
+  ];
+}
+const mApply=(M,p)=>[
+  M[0][0]*p[0]+M[0][1]*p[1]+M[0][2]*p[2],
+  M[1][0]*p[0]+M[1][1]*p[1]+M[1][2]*p[2],
+  M[2][0]*p[0]+M[2][1]*p[1]+M[2][2]*p[2]
+];
+function qConj(q){ return [q[0],-q[1],-q[2],-q[3]]; }
+
+/* ============================================================
+   2. Attitude filter (Mahony complementary, PI form)
+      Gyro gives short-term motion, gravity corrects long-term drift.
+
+      The integral term matters more than it looks. With proportional
+      feedback alone, any residual gyro bias parks the estimate at a
+      PERMANENT offset of roughly bias/KP — about 0.4 deg per dps — so a
+      leveled board settles at "nearly" zero instead of zero. The integral
+      term learns that bias online and cancels it.
+   ============================================================ */
+const KP = 2.4;          // how hard gravity pulls the estimate straight
+const KI = 0.08;         // how fast the residual gyro bias is learned
+const BIAS_CLAMP = 0.12; // rad/s, ~6.9 dps: stops windup if the board is
+                         // manoeuvred for a long time with no good gravity
+const DEG = Math.PI/180;
+
+const att = {
+  q:[1,0,0,0],
+  ib:[0,0,0],            // learned gyro bias, rad/s
+  reset(){ this.q=[1,0,0,0]; this.ib=[0,0,0]; },
+  update(gx,gy,gz, ax,ay,az, dt){
+    if(!(dt>0) || dt>0.5) dt = 0.02;
+    let wx=gx*DEG, wy=gy*DEG, wz=gz*DEG;
+
+    const aMag=Math.hypot(ax,ay,az);
+    // Only trust the accelerometer when it is close to pure gravity.
+    if(aMag>0.72 && aMag<1.28){
+      const meas=[ax/aMag, ay/aMag, az/aMag];      // world "up", in body frame
+      const M=qToM(this.q);
+      const est=[M[2][0], M[2][1], M[2][2]];        // R^T * [0,0,1]
+      const err=v3.cross(meas,est);
+
+      // integral: accumulate, then clamp each axis against windup
+      for(let i=0;i<3;i++){
+        this.ib[i]+=KI*err[i]*dt;
+        if(this.ib[i]> BIAS_CLAMP) this.ib[i]= BIAS_CLAMP;
+        if(this.ib[i]<-BIAS_CLAMP) this.ib[i]=-BIAS_CLAMP;
+      }
+      wx+=this.ib[0]+KP*err[0];
+      wy+=this.ib[1]+KP*err[1];
+      wz+=this.ib[2]+KP*err[2];
+    }else{
+      // No usable gravity reference: still apply the bias already learned,
+      // but do not update it from an accelerometer we do not trust.
+      wx+=this.ib[0]; wy+=this.ib[1]; wz+=this.ib[2];
+    }
+    const dq=qMul(this.q,[0,wx,wy,wz]);
+    this.q=qNorm([
+      this.q[0]+0.5*dq[0]*dt,
+      this.q[1]+0.5*dq[1]*dt,
+      this.q[2]+0.5*dq[2]*dt,
+      this.q[3]+0.5*dq[3]*dt
+    ]);
+  },
+  /* world "up" expressed in the body frame — directly observable, and the
+     basis for the yaw-immune tilt below */
+  up(){
+    const M=qToM(this.q);
+    return [M[2][0], M[2][1], M[2][2]];
+  },
+  /* learned bias in dps, for display */
+  biasDps(){ return this.ib.map(v=>v/DEG); },
+  /* angle between the body +Z axis and world up */
+  tilt(){ return tiltFromQ(this.q); },
+  roll(){ return rollFromQ(this.q); }
+};
+
+/* Standalone versions of the same math, so the display can show orientation
+   relative to whatever the person last called "level" without touching the
+   filter's own tracked quaternion — which must stay true to gravity or the
+   fusion breaks. */
+function tiltFromQ(q){
+  const M=qToM(q);
+  return Math.acos(Math.max(-1,Math.min(1,M[2][2])))/DEG;
+}
+function rollFromQ(q){
+  const [w,x,y,z]=q;
+  return Math.atan2(2*(w*z+x*y), 1-2*(y*y+z*z))/DEG;
+}
+
+/* "Level here" reference orientation. Resetting att.q itself doesn't work:
+   the accelerometer correction inside att.update() pulls the quaternion
+   straight back to match true gravity within a fraction of a second, so any
+   residual tilt reappears almost instantly. Instead we record the
+   orientation at the moment of the button press and display the CURRENT
+   orientation relative to it. */
+let refQ = [1,0,0,0];
+
+/* Reference "up" direction in the body frame, used for the tilt readout.
+   Comparing gravity directions rather than composing full quaternions makes
+   the tilt number immune to yaw drift: a rotation about world vertical
+   leaves the up-vector unchanged, so unobservable heading error cannot leak
+   into tilt. That leak was why a tilted reference pose drifted off zero. */
+let refUp = [0,0,1];
+
+/* Averaged capture. A single instant bakes that instant's sensor noise into
+   the reference; averaging ~1 s of samples cuts it by roughly sqrt(N). */
+let levelling=false, levelBuf=[], levelQBuf=[];
+const LEVEL_MS=1000;
+let levelStart=0;
+
+function beginLevel(){
+  levelling=true; levelBuf=[]; levelQBuf=[];
+  levelStart=performance.now();
+  const b=document.getElementById('btnZero');
+  if(b) b.textContent='Levelling…';
+}
+function levelSample(){
+  if(!levelling) return;
+  levelBuf.push(att.up());
+  levelQBuf.push(att.q.slice());
+  if(performance.now()-levelStart>=LEVEL_MS) finishLevel();
+}
+function finishLevel(){
+  levelling=false;
+  const b=document.getElementById('btnZero');
+  if(b) b.textContent='Level here';
+  if(!levelBuf.length){ refUp=att.up(); refQ=att.q.slice(); return; }
+
+  // mean up-vector, renormalised
+  let u=[0,0,0];
+  for(const v of levelBuf){ u[0]+=v[0]; u[1]+=v[1]; u[2]+=v[2]; }
+  refUp=v3.norm(u);
+
+  // mean quaternion, sign-aligned to the first sample to avoid cancellation
+  const q0=levelQBuf[0];
+  let acc=[0,0,0,0];
+  for(const q of levelQBuf){
+    const d=q[0]*q0[0]+q[1]*q0[1]+q[2]*q0[2]+q[3]*q0[3];
+    const s=d<0?-1:1;
+    for(let i=0;i<4;i++) acc[i]+=s*q[i];
+  }
+  refQ=qNorm(acc);
+  tel.aPeak=0; tel.altPeak=0;
+  sm.init=false;                    // let the smoothers re-seed at the new zero
+}
+
+function dispQ(){
+  return qNorm(qMul(qConj(refQ), att.q));
+}
+
+/* Tilt relative to the levelled pose — the number that should read 0.00
+   when the board is returned to where it was levelled. */
+function tiltRel(){
+  const u=att.up();
+  const d=Math.max(-1,Math.min(1, u[0]*refUp[0]+u[1]*refUp[1]+u[2]*refUp[2]));
+  return Math.acos(d)/DEG;
+}
+
+/* ============================================================
+   3. Rocket geometry — built once, in body coordinates.
+      Body +Z is the nose direction, matching the sketch's tilt math.
+   ============================================================ */
+const SEG=18, R=0.46, Z0=-2.0, Z1=1.55, ZTIP=3.15;
+const verts=[], faces=[];
+
+function pushRing(z){
+  const base=verts.length;
+  for(let i=0;i<SEG;i++){
+    const a=i/SEG*Math.PI*2;
+    verts.push([R*Math.cos(a), R*Math.sin(a), z]);
+  }
+  return base;
+}
+const ringA=pushRing(Z0), ringB=pushRing(-0.35), ringC=pushRing(0.15), ringD=pushRing(Z1);
+const tip=verts.push([0,0,ZTIP])-1;
+
+function tube(r0,r1,kind){
+  for(let i=0;i<SEG;i++){
+    const j=(i+1)%SEG;
+    faces.push({v:[r0+i,r0+j,r1+j,r1+i],kind});
+  }
+}
+tube(ringA,ringB,'body');
+tube(ringB,ringC,'band');   // roll stripe — makes rotation about the long axis readable
+tube(ringC,ringD,'body');
+for(let i=0;i<SEG;i++){
+  faces.push({v:[ringD+i, ringD+(i+1)%SEG, tip], kind:'nose'});
+}
+/* three fins, one of them marked */
+for(let f=0;f<3;f++){
+  const a=f/3*Math.PI*2, ca=Math.cos(a), sa=Math.sin(a);
+  const P=(rad,z)=>verts.push([rad*ca, rad*sa, z])-1;
+  const p1=P(R*0.95,-0.55), p2=P(R*0.95,Z0), p3=P(R*2.5,Z0), p4=P(R*1.9,-1.35);
+  faces.push({v:[p1,p2,p3,p4], kind: f===0?'fin-mark':'fin', double:true});
+}
+
+/* ============================================================
+   4. Renderer
+   ============================================================ */
+const view=document.getElementById('view');
+const ctx=view.getContext('2d');
+let W=0,H=0,DPR=1;
+
+/* Phones get a lower pixel-ratio cap. At DPR 3 a full-width canvas is ~9x
+   the pixels of DPR 1, which is the difference between smooth and not on
+   mobile GPUs, for a detail level nobody can see at arm's length. */
+const IS_TOUCH = matchMedia('(pointer:coarse)').matches;
+const DPR_CAP  = IS_TOUCH ? 1.5 : 2;
+
+/* Reassigning canvas.width reallocates and clears the backing buffer, and
+   getBoundingClientRect() forces a synchronous layout reflow. Doing either
+   per frame — times four canvases, at 60fps — is what made the display
+   stutter on phones. Cache the size and only touch the canvas when it has
+   genuinely changed. */
+const sizeCache = new WeakMap();
+function fit(cv,c){
+  let cache = sizeCache.get(cv);
+  if(!cache || cache.dirty){
+    const r = cv.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio||1, DPR_CAP);
+    const pw = Math.max(1,Math.round(r.width*dpr));
+    const ph = Math.max(1,Math.round(r.height*dpr));
+    if(!cache || cv.width!==pw || cv.height!==ph){
+      cv.width=pw; cv.height=ph;
+    }
+    cache = {w:r.width, h:r.height, dpr, dirty:false};
+    sizeCache.set(cv, cache);
+  }
+  DPR = cache.dpr;
+  c.setTransform(cache.dpr,0,0,cache.dpr,0,0);
+  return [cache.w, cache.h];
+}
+
+/* Mark every cached canvas size stale on resize / rotate, so the next frame
+   re-measures exactly once instead of every frame forever. */
+function invalidateSizes(){
+  for(const cv of [view, document.getElementById('chAlt'),
+                   document.getElementById('chAcc'),
+                   document.getElementById('chTilt')]){
+    const c = sizeCache.get(cv);
+    if(c) c.dirty = true;
+  }
+}
+addEventListener('resize', invalidateSizes);
+addEventListener('orientationchange', invalidateSizes);
+
+const EYE=[7.4,-9.2,3.0], TGT=[0,0,0.2], FOCAL=1.42;
+const fwd=v3.norm(v3.sub(TGT,EYE));
+const rgt=v3.norm(v3.cross(fwd,[0,0,1]));
+const upv=v3.cross(rgt,fwd);
+
+function project(p,cx,cy,scale){
+  const d=v3.sub(p,EYE);
+  const z=v3.dot(d,fwd);
+  if(z<0.05) return null;
+  return {
+    x:cx + v3.dot(d,rgt)*FOCAL/z*scale,
+    y:cy - v3.dot(d,upv)*FOCAL/z*scale,
+    z
+  };
+}
+
+const FILL={
+  body:'#CBD0C6', band:'#23508C', nose:'#BFC5BA',
+  fin:'#C4CABF', 'fin-mark':'#C0392B'
+};
+function shade(hex,k){
+  const r=parseInt(hex.slice(1,3),16), g=parseInt(hex.slice(3,5),16), b=parseInt(hex.slice(5,7),16);
+  const m=x=>Math.max(0,Math.min(255,Math.round(x*k)));
+  return `rgb(${m(r)},${m(g)},${m(b)})`;
+}
+const LIGHT=v3.norm([-0.45,-0.8,0.75]);
+
+function drawRocket(M, cx, cy, scale, opts){
+  const world=verts.map(p=>mApply(M,p));
+  const scr=world.map(p=>project(p,cx,cy,scale));
+
+  const drawList=[];
+  for(const f of faces){
+    const pts=f.v.map(i=>scr[i]);
+    if(pts.some(p=>!p)) continue;
+    const wp=f.v.map(i=>world[i]);
+    const n=v3.norm(v3.cross(v3.sub(wp[1],wp[0]), v3.sub(wp[2],wp[0])));
+    const toEye=v3.norm(v3.sub(EYE,wp[0]));
+    const facing=v3.dot(n,toEye);
+    if(facing<=0 && !f.double) continue;
+    const nn = facing<0 ? [-n[0],-n[1],-n[2]] : n;
+    const lam=0.55+0.45*Math.max(0,v3.dot(nn,LIGHT));
+    drawList.push({pts, depth:pts.reduce((s,p)=>s+p.z,0)/pts.length, fill:shade(FILL[f.kind],lam)});
+  }
+  drawList.sort((a,b)=>b.depth-a.depth);
+
+  ctx.lineJoin='round';
+  for(const d of drawList){
+    ctx.beginPath();
+    ctx.moveTo(d.pts[0].x,d.pts[0].y);
+    for(let i=1;i<d.pts.length;i++) ctx.lineTo(d.pts[i].x,d.pts[i].y);
+    ctx.closePath();
+    if(opts && opts.ghost){
+      ctx.strokeStyle='rgba(23,28,25,.16)';
+      ctx.lineWidth=1;
+      ctx.setLineDash([4,4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }else{
+      ctx.fillStyle=d.fill; ctx.fill();
+      ctx.strokeStyle='rgba(23,28,25,.55)'; ctx.lineWidth=.7; ctx.stroke();
+    }
+  }
+  return {scr, world};
+}
+
+function drawScene(){
+  const [w,h]=fit(view,ctx);
+  W=w;H=h;
+  ctx.clearRect(0,0,w,h);
+  const cx=w*0.46, cy=h*0.54;
+  const scale=Math.min(w,h)*0.62;
+
+  /* baseplate: horizon ellipse + centre cross */
+  ctx.save();
+  ctx.strokeStyle='rgba(23,28,25,.22)'; ctx.lineWidth=1;
+  ctx.beginPath();
+  for(let i=0;i<=64;i++){
+    const a=i/64*Math.PI*2;
+    const p=project([3.1*Math.cos(a),3.1*Math.sin(a),Z0],cx,cy,scale);
+    if(!p) continue;
+    i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y);
+  }
+  ctx.closePath(); ctx.stroke();
+  ctx.restore();
+
+  /* vertical reference line — where the rocket would be at zero tilt */
+  const pB=project([0,0,Z0],cx,cy,scale), pT=project([0,0,ZTIP+0.9],cx,cy,scale);
+  if(pB&&pT){
+    ctx.save();
+    ctx.strokeStyle='rgba(35,80,140,.5)'; ctx.lineWidth=1; ctx.setLineDash([7,5]);
+    ctx.beginPath(); ctx.moveTo(pB.x,pB.y); ctx.lineTo(pT.x,pT.y); ctx.stroke();
+    ctx.restore();
+  }
+
+  const M=qToM(renderQ);
+  drawRocket([[1,0,0],[0,1,0],[0,0,1]],cx,cy,scale,{ghost:true});
+  drawRocket(M,cx,cy,scale,{});
+
+  /* live axis + tilt arc, drawn in screen space over the model */
+  const axisTip=project(mApply(M,[0,0,ZTIP+0.9]),cx,cy,scale);
+  if(pB&&pT&&axisTip){
+    ctx.save();
+    ctx.strokeStyle='#C0392B'; ctx.lineWidth=1.6;
+    ctx.beginPath(); ctx.moveTo(pB.x,pB.y); ctx.lineTo(axisTip.x,axisTip.y); ctx.stroke();
+
+    const a0=Math.atan2(pT.y-pB.y, pT.x-pB.x);
+    const a1=Math.atan2(axisTip.y-pB.y, axisTip.x-pB.x);
+    const rad=Math.min(W,H)*0.24;
+    ctx.strokeStyle='rgba(192,57,43,.75)'; ctx.lineWidth=1.4;
+    ctx.beginPath(); ctx.arc(pB.x,pB.y,rad,Math.min(a0,a1),Math.max(a0,a1)); ctx.stroke();
+
+    const am=(a0+a1)/2;
+    ctx.fillStyle='#C0392B';
+    ctx.font='600 13px "IBM Plex Mono", monospace';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(tiltRel().toFixed(2)+'\u00B0', pB.x+Math.cos(am)*(rad+16), pB.y+Math.sin(am)*(rad+16));
+    ctx.restore();
+  }
+}
+
+/* ============================================================
+   5. Strip charts
+   ============================================================ */
+function Strip(id,color){
+  const cv=document.getElementById(id), c=cv.getContext('2d');
+  const data=[]; const MAX=260;
+  return {
+    push(v){ data.push(v); if(data.length>MAX) data.shift(); },
+    draw(){
+      const [rw,rh]=fit(cv,c);          // cached; no per-frame reflow
+      const r={width:rw,height:rh};
+      c.clearRect(0,0,r.width,r.height);
+      if(data.length<2) return;
+      let lo=Math.min(...data), hi=Math.max(...data);
+      if(hi-lo<1e-6){hi+=.5;lo-=.5;}
+      const pad=(hi-lo)*0.14; lo-=pad; hi+=pad;
+      const X=i=>i/(MAX-1)*r.width;
+      const Y=v=>r.height-((v-lo)/(hi-lo))*r.height;
+
+      c.strokeStyle='rgba(23,28,25,.14)'; c.lineWidth=1;
+      c.beginPath(); c.moveTo(0,Y(lo+(hi-lo)/2)); c.lineTo(r.width,Y(lo+(hi-lo)/2)); c.stroke();
+
+      c.strokeStyle=color; c.lineWidth=1.5; c.beginPath();
+      data.forEach((v,i)=>{ const x=X(i),y=Y(v); i?c.lineTo(x,y):c.moveTo(x,y); });
+      c.stroke();
+    }
+  };
+}
+const stripAlt=Strip('chAlt','#23508C');
+const stripAcc=Strip('chAcc','#9A6206');
+const stripTilt=Strip('chTilt','#C0392B');
+
+/* ============================================================
+   6. Telemetry state + parsing
+      Expected line:  V,ax,ay,az,gx,gy,gz,alt,vel[,millis]
+      The 10th field is optional: the firmware sends the board's own
+      millis(). Using it instead of PC arrival time removes the timing
+      jitter caused by USB delivering frames in bursts, which otherwise
+      feeds noise straight into the attitude integration.
+   ============================================================ */
+const tel={
+  ax:0,ay:0,az:1,gx:0,gy:0,gz:0,alt:0,vel:0,
+  aMag:1,gMag:0,aPeak:0,altPeak:0,
+  frames:0,bad:0,rate:0,last:0,
+  boardMs:0, usingBoardTime:false
+};
+let rateWin=[];
+
+/* ---- display smoothing -------------------------------------------------
+   These smooth what is SHOWN, not what is measured. The filter, the peak
+   trackers and anything you would quote as a result stay on raw values;
+   only the on-screen numbers and the rendered model are eased, so the
+   display is readable without misrepresenting the sensor. */
+let smoothOn = true;
+const sm = { tilt:0, roll:0, gz:0, gMag:0, aMag:1, ax:0, ay:0, az:1, alt:0, vel:0, init:false };
+
+/* frame-rate independent exponential moving average */
+function ema(prev, x, dt, tau){
+  if(!(dt>0)) return x;
+  const a = 1 - Math.exp(-dt/tau);
+  return prev + a*(x-prev);
+}
+
+/* Median-of-3 on altitude before averaging. The barometer throws occasional
+   single-sample spikes that an EMA would smear across several frames instead
+   of rejecting outright. */
+const altHist=[];
+function altMedian3(v){
+  altHist.push(v);
+  if(altHist.length>3) altHist.shift();
+  if(altHist.length<3) return v;
+  const s=altHist.slice().sort((a,b)=>a-b);
+  return s[1];
+}
+
+function ingest(parts){
+  const n=parts.map(Number);
+  if(n.some(x=>!isFinite(x))) { tel.bad++; return false; }
+  const nowPC=performance.now()/1000;
+
+  // Prefer the board's clock when the firmware provides it.
+  let dt;
+  if(n.length>=9 && isFinite(n[8])){
+    const ms=n[8];
+    dt = tel.boardMs ? (ms-tel.boardMs)/1000 : 0.04;
+    tel.boardMs=ms;
+    tel.usingBoardTime=true;
+    if(!(dt>0) || dt>0.5) dt=0.04;      // rollover or a dropped frame
+  }else{
+    dt = tel.last ? nowPC-tel.last : 0.04;
+    tel.usingBoardTime=false;
+  }
+  tel.last=nowPC;
+
+  [tel.ax,tel.ay,tel.az,tel.gx,tel.gy,tel.gz,tel.alt,tel.vel]=n;
+  tel.aMag=Math.hypot(tel.ax,tel.ay,tel.az);
+  tel.gMag=Math.hypot(tel.gx,tel.gy,tel.gz);
+  tel.aPeak=Math.max(tel.aPeak,tel.aMag);      // peaks stay on RAW
+  tel.altPeak=Math.max(tel.altPeak,tel.alt);
+  tel.frames++;
+
+  att.update(tel.gx,tel.gy,tel.gz, tel.ax,tel.ay,tel.az, dt);
+  levelSample();
+
+  // ---- smoothed display copies ----
+  const dq=dispQ();
+  const tiltNow=tiltRel(), rollNow=rollFromQ(dq);
+  const altMed=altMedian3(tel.alt);
+  if(!sm.init){
+    sm.tilt=tiltNow; sm.roll=rollNow; sm.gz=tel.gz; sm.gMag=tel.gMag;
+    sm.aMag=tel.aMag; sm.ax=tel.ax; sm.ay=tel.ay; sm.az=tel.az;
+    sm.alt=altMed; sm.vel=tel.vel; sm.init=true;
+  }else{
+    sm.tilt=ema(sm.tilt, tiltNow,   dt, 0.15);
+    sm.roll=ema(sm.roll, rollNow,   dt, 0.15);
+    sm.gz  =ema(sm.gz,   tel.gz,    dt, 0.15);
+    sm.gMag=ema(sm.gMag, tel.gMag,  dt, 0.15);
+    sm.aMag=ema(sm.aMag, tel.aMag,  dt, 0.20);
+    sm.ax  =ema(sm.ax,   tel.ax,    dt, 0.20);
+    sm.ay  =ema(sm.ay,   tel.ay,    dt, 0.20);
+    sm.az  =ema(sm.az,   tel.az,    dt, 0.20);
+    sm.alt =ema(sm.alt,  altMed,    dt, 0.50);   // barometer is the noisiest
+    sm.vel =ema(sm.vel,  tel.vel,   dt, 0.40);
+  }
+
+  rateWin.push(nowPC);
+  while(rateWin.length && nowPC-rateWin[0]>1) rateWin.shift();
+  tel.rate=rateWin.length;
+
+  stripAlt.push(smoothOn ? sm.alt  : tel.alt);
+  stripAcc.push(smoothOn ? sm.aMag : tel.aMag);
+  stripTilt.push(smoothOn ? sm.tilt : tiltNow);
+  return true;
+}
+
+function handleLine(line){
+  line=line.trim();
+  if(!line) return;
+  document.getElementById('raw').textContent=line;
+  if(line.startsWith('V,')){
+    const parts=line.slice(2).split(',');
+    // 8 fields minimum; a 9th (board millis) is used when present.
+    if(parts.length>=8 && ingest(parts.slice(0,9))) lastFrameAt=performance.now();
+    else tel.bad++;
+  }
+}
+
+/* ============================================================
+   7. Web Serial
+   ============================================================ */
+let port=null, reader=null, writer=null, keepReading=false;
+let lastFrameAt=0, connectedAt=0, nagged=false;
+
+/* The sketch toggles its telemetry stream on the character 'v'.
+   With the Serial Monitor closed, this page is the only thing that can send it. */
+async function sendChar(ch){
+  if(!writer) return false;
+  try{ await writer.write(new TextEncoder().encode(ch)); return true; }
+  catch(e){ return false; }
+}
+const dot=document.getElementById('dot');
+const statusText=document.getElementById('statusText');
+const banner=document.getElementById('banner');
+
+function setStatus(text,cls){
+  statusText.textContent=text;
+  dot.className='dot'+(cls?' '+cls:'');
+}
+function showBanner(html){
+  banner.innerHTML=html; banner.classList.remove('hide');
+}
+
+async function connect(){
+  if(!('serial' in navigator)){
+    showBanner('<b>This browser has no Web Serial.</b> Open this file in Chrome or Edge on desktop, or use the demo instead.');
+    setStatus('Unsupported','err');
+    return;
+  }
+  try{
+    port=await navigator.serial.requestPort();
+    await port.open({baudRate:115200});
+    demoOn=false;
+    keepReading=true;
+    writer=port.writable.getWriter();
+    connectedAt=performance.now();
+    refQ=[1,0,0,0]; refUp=[0,0,1];
+    lastFrameAt=0; nagged=false;
+    setStatus('Live','live');
+    banner.classList.add('hide');
+    document.getElementById('btnV').disabled=false;
+    readLoop();
+    // Give the board a moment to finish booting, then ask for the stream.
+    setTimeout(()=>sendChar('v'), 1500);
+  }catch(e){
+    // requestPort() above already assigned `port` even though open() then
+    // failed. Clear it, or every check elsewhere that tests "if(port)"
+    // wrongly concludes we're connected.
+    port=null;
+    const detail=(e && e.message) ? e.message : 'unknown error';
+    setStatus('Port busy or cancelled','err');
+    showBanner('Could not open the port (<b>'+detail+'</b>). Usually this means another '+
+               'tab or the Arduino Serial Monitor already has it open. Close those, then try again.');
+  }
+}
+
+async function readLoop(){
+  const dec=new TextDecoderStream();
+  const closed=port.readable.pipeTo(dec.writable).catch(()=>{});
+  reader=dec.readable.getReader();
+  let buf='';
+  try{
+    while(keepReading){
+      const {value,done}=await reader.read();
+      if(done) break;
+      buf+=value;
+      let i;
+      while((i=buf.indexOf('\n'))>=0){
+        handleLine(buf.slice(0,i));
+        buf=buf.slice(i+1);
+      }
+      if(buf.length>4096) buf='';
+    }
+  }catch(e){ /* unplugged */ }
+  finally{
+    try{reader.releaseLock();}catch(e){}
+    if(writer){ try{writer.releaseLock();}catch(e){} writer=null; }
+    try{await port.close();}catch(e){}
+    await closed;
+    port=null;
+    if(!demoOn) setStatus('Disconnected');
+    document.getElementById('btnConnect').textContent='Connect board';
+    document.getElementById('btnV').disabled=true;
+  }
+}
+
+async function disconnect(){
+  keepReading=false;
+  if(reader){ try{await reader.cancel();}catch(e){} }
+}
+
+document.getElementById('btnConnect').addEventListener('click',async()=>{
+  const b=document.getElementById('btnConnect');
+  if(port){ await disconnect(); b.textContent='Connect board'; }
+  else{ await connect(); if(port) b.textContent='Disconnect'; }
+});
+
+document.getElementById('btnV').addEventListener('click',async()=>{
+  const ok=await sendChar('v');
+  if(!ok) showBanner('Could not write to the port. Disconnect and connect again.');
+  else { nagged=false; lastFrameAt=0; connectedAt=performance.now(); }
+});
+
+/* ============================================================
+   8. Demo — synthesises a genuine orientation, then hands the
+      filter noisy sensor readings derived from it.
+   ============================================================ */
+let demoOn=false, demoT=0, demoQprev=[1,0,0,0];
+document.getElementById('btnDemo').addEventListener('click',()=>{
+  demoOn=!demoOn;
+  document.getElementById('btnDemo').textContent=demoOn?'Stop demo':'Run demo';
+  if(demoOn){ refQ=[1,0,0,0]; refUp=[0,0,1]; setStatus('Demo data','demo'); banner.classList.add('hide'); }
+  else setStatus(port?'Live':'Not connected', port?'live':'');
+});
+
+function euler2q(yaw,pitch,roll){
+  const cy=Math.cos(yaw/2), sy=Math.sin(yaw/2);
+  const cp=Math.cos(pitch/2), sp=Math.sin(pitch/2);
+  const cr=Math.cos(roll/2), sr=Math.sin(roll/2);
+  return qNorm([cy*cp*cr+sy*sp*sr, cy*cp*sr-sy*sp*cr, sy*cp*sr+cy*sp*cr, sy*cp*cr-cy*sp*sr]);
+}
+
+function demoStep(dt){
+  demoT+=dt;
+  const t=demoT;
+  const q=euler2q(0.55*t, 26*DEG*Math.sin(t*0.62)+5*DEG*Math.sin(t*3.1), 14*DEG*Math.sin(t*0.9));
+
+  // body rates from the change in orientation
+  const qi=[demoQprev[0],-demoQprev[1],-demoQprev[2],-demoQprev[3]];
+  const dq=qMul(qi,q);
+  const s=dq[0]<0?-1:1;
+  const gx=2*s*dq[1]/dt/DEG, gy=2*s*dq[2]/dt/DEG, gz=2*s*dq[3]/dt/DEG;
+  demoQprev=q;
+
+  // gravity seen in the body frame
+  const M=qToM(q);
+  const nz=(()=>Math.random()*0.02-0.01);
+  const ax=M[2][0]+nz(), ay=M[2][1]+nz(), az=M[2][2]+nz();
+
+  const alt=0.35*Math.sin(t*0.4)+0.05*Math.sin(t*2.3)+(Math.random()*0.06-0.03);
+  const vel=0.14*Math.cos(t*0.4);
+  ingest([ax,ay,az,gx,gy,gz,alt,vel]);
+  document.getElementById('raw').textContent =
+    'DEMO  V,'+[ax,ay,az,gx,gy,gz,alt,vel].map(x=>x.toFixed(3)).join(',');
+}
+
+/* ============================================================
+   9. Level / zero
+   ============================================================ */
+document.getElementById('btnZero').addEventListener('click',()=>{
+  beginLevel();
+});
+
+document.getElementById('btnSmooth').addEventListener('click',()=>{
+  smoothOn=!smoothOn;
+  document.getElementById('btnSmooth').textContent='Smoothing: '+(smoothOn?'on':'off');
+});
+
+/* ============================================================
+   10. Frame loop
+   ============================================================ */
+const f1=x=>x.toFixed(1), f2=x=>x.toFixed(2);
+let lastFrame=performance.now();
+
+/* Cache element lookups and skip DOM writes when the formatted string has
+   not changed. Assigning textContent invalidates layout even when the value
+   is identical; at ~18 readouts x 60fps that is a lot of pointless work for
+   a phone, and most of these fields only change every few frames anyway. */
+const _els={}, _prev={};
+function put(id, txt){
+  if(_prev[id]===txt) return;
+  _prev[id]=txt;
+  (_els[id] || (_els[id]=document.getElementById(id))).textContent=txt;
+}
+function putHTML(id, html){
+  if(_prev[id]===html) return;
+  _prev[id]=html;
+  (_els[id] || (_els[id]=document.getElementById(id))).innerHTML=html;
+}
+
+function ui(){
+  const dq=dispQ();
+  const S=smoothOn;
+  const vTilt = S? sm.tilt : tiltRel();
+  const vRoll = S? sm.roll : rollFromQ(dq);
+  const vGz   = S? sm.gz   : tel.gz;
+  const vGMag = S? sm.gMag : tel.gMag;
+  const vAMag = S? sm.aMag : tel.aMag;
+  const vAx   = S? sm.ax   : tel.ax;
+  const vAy   = S? sm.ay   : tel.ay;
+  const vAz   = S? sm.az   : tel.az;
+  const vAlt  = S? sm.alt  : tel.alt;
+  const vVel  = S? sm.vel  : tel.vel;
+
+  putHTML('oTilt', f2(vTilt)+'<span class="u">deg</span>');
+  put('oRoll', f1(vRoll)+'\u00B0');
+  put('oRollRate', f1(vGz)+' dps');
+  put('oGyro', f1(vGMag)+' dps');
+  const bd=att.biasDps();
+  put('oBias', Math.hypot(bd[0],bd[1],bd[2]).toFixed(2)+' dps');
+
+  put('oAmag', f2(vAMag)+' g');
+  const _warn = Math.abs(vAMag-1)>0.06 && vGMag<40;
+  if(_prev.__warn !== _warn){
+    _prev.__warn = _warn;
+    _els['oAmag'].classList.toggle('warn', _warn);
+  }
+
+  put('oAxes', [vAx,vAy,vAz].map(f2).join(' / '));
+  put('oApeak', f2(tel.aPeak)+' g');                       // raw
+  put('oAlt', f2(vAlt)+' m');
+  put('oVel', f2(vVel)+' m/s');
+  put('oAltPeak', f2(tel.altPeak)+' m');                   // raw
+  put('oRate', tel.rate+' Hz'+(tel.usingBoardTime?' \u00B7 brd':''));
+  put('oFrames', String(tel.frames));
+  put('oBad', String(tel.bad));
+
+  put('cAlt', f2(vAlt));
+  put('cAcc', f2(vAMag));
+  put('cTilt', f1(vTilt));
+}
+
+/* Rendered orientation, eased toward the live one each animation frame.
+   Data arrives at ~25 Hz but we redraw at ~60, so this both damps jitter
+   and interpolates between samples, which is what makes the model glide
+   rather than step. Normalized lerp is fine here — the per-frame angle is
+   far too small for slerp's constant-velocity property to matter. */
+let renderQ=[1,0,0,0];
+function easeRenderQ(dt){
+  const t=dispQ();
+  if(!smoothOn){ renderQ=t; return; }
+  // shortest path: flip if the two are on opposite hemispheres
+  const d=renderQ[0]*t[0]+renderQ[1]*t[1]+renderQ[2]*t[2]+renderQ[3]*t[3];
+  const s=d<0?-1:1;
+  const a=1-Math.exp(-dt/0.06);
+  renderQ=qNorm([
+    renderQ[0]+a*(s*t[0]-renderQ[0]),
+    renderQ[1]+a*(s*t[1]-renderQ[1]),
+    renderQ[2]+a*(s*t[2]-renderQ[2]),
+    renderQ[3]+a*(s*t[3]-renderQ[3])
+  ]);
+}
+
+/* Render budget.
+   Telemetry arrives at 25 Hz. On a phone there is nothing to gain from
+   redrawing the whole scene at 60 — it just burns battery and competes
+   with the Wi-Fi stack for CPU, which is exactly when frames get dropped.
+   The strip charts change even more slowly, so they get their own slower
+   budget. Desktop keeps the full rate. */
+const RENDER_HZ = IS_TOUCH ? 30 : 60;
+const RENDER_MS = 1000 / RENDER_HZ;
+const STRIP_MS  = IS_TOUCH ? 100 : 50;      // charts: 10 Hz on mobile
+let lastRender = 0, lastStrip = 0;
+let hidden = false;
+
+/* A backgrounded tab throttles rAF to ~1 Hz anyway; stop drawing entirely
+   so we are not doing partial work at unpredictable intervals, and re-seed
+   the clock on return so easing does not jump. */
+addEventListener('visibilitychange', ()=>{
+  hidden = document.hidden;
+  if(!hidden){ lastFrame = performance.now(); invalidateSizes(); }
+});
+
+function frame(now){
+  requestAnimationFrame(frame);
+  if(hidden) return;
+
+  if(now - lastRender < RENDER_MS) return;
+  const dt=Math.min(0.1,(now-lastFrame)/1000);
+  lastFrame=now;
+  lastRender=now;
+
+  easeRenderQ(dt);
+
+  // Connected, receiving something, but nothing this page can read.
+  if(port && !nagged && !lastFrameAt && now-connectedAt>5000){
+    nagged=true;
+    showBanner('Connected, but no <b>V,</b> frames yet &mdash; the sketch is still printing its table. '+
+               'Press <b>Toggle stream</b> to send the <b>v</b> command again.');
+  }
+  if(port && lastFrameAt) banner.classList.add('hide');
+
+  if(demoOn) demoStep(dt);
+  drawScene();
+  if(now - lastStrip >= STRIP_MS){
+    lastStrip = now;
+    stripAlt.draw(); stripAcc.draw(); stripTilt.draw();
+  }
+  ui();
+}
+requestAnimationFrame(frame);
+
+/* ============================================================
+   11. Network mode (ground station)
+
+   When this page is served over HTTP it is coming from the Pico W
+   ground station, so telemetry arrives via Server-Sent Events instead
+   of Web Serial. Phones have no Web Serial at all, which is exactly why
+   the ground station serves the page rather than asking the phone to
+   open a port. The wire format is identical ("V,..." lines), so
+   handleLine() below is shared by both paths unchanged.
+   ============================================================ */
+const NET_MODE = location.protocol === 'http:' || location.protocol === 'https:';
+let es = null, esRetry = 0;
+
+function setModeUI(){
+  const show = (sel, on) => document.querySelectorAll(sel)
+    .forEach(el => el.style.display = on ? '' : 'none');
+  show('.serial-only', !NET_MODE);
+  show('.net-only', NET_MODE);
+  if(NET_MODE){
+    document.getElementById('subtitle').innerHTML =
+      'MS5611 &middot; LSM6 &middot; live telemetry over Wi-Fi';
+    document.getElementById('hintSerial').style.display='none';
+    document.getElementById('hintNet').style.display='';
+  }
+}
+
+function connectSSE(){
+  if(es){ try{ es.close(); }catch(e){} es=null; }
+  setStatus('Connecting…');
+  try{
+    es = new EventSource('/stream');
+  }catch(e){
+    setStatus('No stream','err');
+    showBanner('Could not open the telemetry stream. Is the ground station still powered?');
+    return;
+  }
+
+  es.addEventListener('hello', e=>{
+    banner.classList.add('hide');
+  });
+
+  es.onopen = ()=>{
+    esRetry = 0;
+    setStatus('Live','live');
+    banner.classList.add('hide');
+    connectedAt = performance.now();
+    lastFrameAt = 0; nagged = true;   // no 'press v' nag in network mode
+    refQ=[1,0,0,0]; refUp=[0,0,1];
+  };
+
+  es.onmessage = e=>{
+    handleLine(e.data);
+  };
+
+  es.onerror = ()=>{
+    // EventSource retries on its own; surface it rather than looking frozen.
+    setStatus('Reconnecting…','err');
+    esRetry++;
+    if(esRetry === 3){
+      showBanner('Lost the ground station. Check the Pico W is powered and you are still joined to its Wi-Fi network.');
+    }
+  };
+}
+
+if(NET_MODE){
+  setModeUI();
+  document.getElementById('btnNet').addEventListener('click', ()=>{
+    esRetry=0; connectSSE();
+  });
+  document.getElementById('selMode').addEventListener('change', ev=>{
+    fetch('/mode?m='+encodeURIComponent(ev.target.value))
+      .then(()=>{ tel.aPeak=0; tel.altPeak=0; sm.init=false; })
+      .catch(()=>showBanner('Could not switch source mode.'));
+  });
+  connectSSE();
+}else{
+  setModeUI();
+  if(!('serial' in navigator)){
+    showBanner('This browser has no Web Serial, so the board cannot be read here. Chrome or Edge on desktop will work &mdash; meanwhile, <b>Run demo</b> shows the same display with synthetic motion.');
+  }
+}
+</script>
+</body>
+</html>
