@@ -17,7 +17,7 @@ built hardware.**
 |---|---|
 | MS5611 barometer | Wired to the flight Pico, reading |
 | MinIMU-9 v6 board | Wired; LSM6DSO (accel/gyro) reading. LIS3MDL magnetometer not read by the current sketch |
-| Bench diagnostics (`rocket_diagnostics.ino`) | Working on hardware |
+| Bench diagnostics (`rocket_diagnostics/`) | Working on hardware |
 | Pico W ground station + viewer | Working — **synthetic telemetry only** |
 | ADXL375 high-g | Not connected |
 | SAM-M8Q GPS | Not connected |
@@ -64,7 +64,7 @@ documents disagree, that one wins.
 | [`airframe_build_spec.md`](airframe_build_spec.md) | Airframe structure, materials, dimensions, assembly sequence |
 | [`avionics_status_report.md`](avionics_status_report.md) | Project status summary |
 | `water_rocket_avionics_bom.xlsx` | Bill of materials — costs, suppliers, phasing, per-part justification |
-| `rocket_diagnostics.ino` | Bench diagnostics sketch (verified working on hardware) |
+| [`rocket_diagnostics/`](rocket_diagnostics/) | Bench diagnostics sketch (verified working on hardware) |
 | `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Web Serial over USB, or SSE over Wi-Fi |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer — the bench path that works today |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each version |
