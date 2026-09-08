@@ -184,7 +184,7 @@ range ceiling" warning.
 
 **Gyro bias:** average 400-500 samples with the rocket held still at boot and
 subtract that offset from every subsequent reading. Skip this and your attitude
-estimate drifts visibly within seconds. (`rocket_diagnostics.ino` uses 250 at
+estimate drifts visibly within seconds. (`rocket_diagnostics/` uses 250 at
 25 Hz — enough for bench work, and re-runnable in place with the `b` command
 as the board warms. Flight firmware takes the full 400-500.)
 

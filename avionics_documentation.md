@@ -902,6 +902,11 @@ backup channel, second deployment event, or an OLED.
 **Official Arduino Mbed OS RP2040 core** (not the Earle Philhower community
 core). This has non-obvious consequences — see §10.1.
 
+**Sketch layout.** The Arduino IDE requires a `.ino` to sit in a folder of the
+same name, so each sketch gets its own directory — `rocket_diagnostics/`,
+`rocket_flight/`. Opening a bare `.ino` at the repository root prompts the IDE
+to relocate it, and two of them at the root cannot both be opened cleanly.
+
 | Device | Library |
 |---|---|
 | MS5611 | MS5611 by Rob Tillaart |
@@ -1081,7 +1086,7 @@ address does not appear, stop and fix it — do not proceed hoping.**
 
 ### 13.2 Bench diagnostics
 
-A standalone sketch (`rocket_diagnostics.ino`) reports interpreted
+A standalone sketch (`rocket_diagnostics/`) reports interpreted
 values — °C, hPa, metres AGL, m/s, g, degrees tilt — plus:
 
 - I²C scan (with the §10.1 dummy-byte fix) and per-device pass/fail at boot
@@ -1205,9 +1210,9 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
       tilt inhibit that §5.4 specifies
 - [ ] Re-measure 1σ altitude noise with smoothing off, and set
       `APOGEE_DROP_M` from it (§13.2)
-- [ ] **Write `rocket_flight.ino`** — the flight firmware skeleton §15 lists.
-      The state machine (§5.4), threading model (§10.2) and flight record
-      (§10.3) are specified; nothing implements them yet
+- [ ] **Write `rocket_flight/rocket_flight.ino`** — the flight firmware
+      skeleton §15 lists. The state machine (§5.4), threading model (§10.2)
+      and flight record (§10.3) are specified; nothing implements them yet
 - [ ] Full state-machine integration test (syringe method)
 - [ ] Collar joint CAD with real tolerances (Fusion 360); FEA the pin/collar
       under 478 N
@@ -1225,8 +1230,8 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 | `water_rocket_avionics_bom.xlsx` | Full bill of materials, costs, suppliers, phasing, per-part justification |
 | `airframe_build_spec.md` | Airframe structure, materials, dimensions, assembly sequence |
 | `hardware_reference.md` | Quick bench reference — pin map, addresses, per-sensor driver notes, bring-up order. Kept in sync with this document; **this document is the authority** where the two disagree |
-| `rocket_diagnostics.ino` | Bench diagnostics sketch (verified working on hardware) |
-| `rocket_flight.ino` | Flight firmware skeleton — state machine, threading, telemetry. **Not written** (§14) |
+| `rocket_diagnostics/` | Bench diagnostics sketch (verified working on hardware) |
+| `rocket_flight/` | Flight firmware skeleton — state machine, threading, telemetry. **Not written** (§14) |
 | `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Self-contained; Web Serial over USB or SSE over Wi-Fi (§6.7) |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer. The bench path that works *today*, driving the viewer straight off the flight computer over USB while the flight-to-ground radio does not yet exist (§6.7) |
 | `pico_w_ground_station/main.py` | **Ground station firmware.** MicroPython: Wi-Fi AP, web server, SSE telemetry (§6.5) |

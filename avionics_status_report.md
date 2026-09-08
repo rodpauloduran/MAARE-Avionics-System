@@ -38,7 +38,7 @@ community core. That choice has consequences the design document treats in
 §10.1 — no `setup1()`/`loop1()`, no bundled LittleFS, a reduced RAM budget, and
 a zero-length-`endTransmission()` defect that affects every I²C probe.
 
-**What runs today:** [`rocket_diagnostics.ino`](rocket_diagnostics.ino), a
+**What runs today:** [`rocket_diagnostics/`](rocket_diagnostics/), a
 bench sketch driving the MS5611 and LSM6DSO. It reports interpreted values —
 °C, hPa, metres AGL, m/s, g, degrees tilt — plus:
 
@@ -144,8 +144,8 @@ locally and is not relied upon.
 
 **Firmware**
 
-- [ ] **Write `rocket_flight.ino`** — state machine, threading model and flight
-      record are specified; nothing implements them yet
+- [ ] **Write `rocket_flight/rocket_flight.ino`** — state machine, threading
+      model and flight record are specified; nothing implements them yet
 - [ ] Port the attitude filter into flight firmware and implement the tilt
       inhibit the state machine specifies
 - [ ] Extend LSM6DSO configuration to flight ranges (±16 g, ±2000 dps) via
