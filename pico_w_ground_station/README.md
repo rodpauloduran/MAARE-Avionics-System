@@ -1,153 +1,198 @@
-# Pico W Ground Station
+# Rocket Ground Station — Pico W
 
-Raspberry Pi Pico W running MicroPython. Brings up its **own Wi-Fi access
-point**, serves the attitude viewer, and streams telemetry to any phone or
-laptop that joins. No router, no internet, no app install — which is the point,
-because a launch site has none of those.
+Turns a Raspberry Pi Pico W into a self-contained Wi-Fi access point that
+serves the attitude viewer and streams telemetry to your phone. No router,
+no internet, no app install.
 
-> **Status: built and working on hardware. Telemetry source is synthetic — the
-> radio link is not yet wired in.** Nothing in this path has carried a real
-> sensor reading over the air. See [Wiring in the radio](#wiring-in-the-radio).
+**Telemetry is synthetic right now.** The radio link isn't wired yet — this
+exists to prove out the viewing and UI half of the system. There's one
+function to replace when the radio arrives (see below).
 
-See §6.5 of `AVIONICS_DOCUMENTATION.md` for the design reasoning.
+Design reasoning lives in [`AVIONICS_DOCUMENTATION.md`](../AVIONICS_DOCUMENTATION.md)
+§6.5 (ground station) and §6.7 (viewer). That document is the authority if the
+two ever disagree.
 
-```
-   Rocket ──LoRa──▶ [RFM95W] ──UART──▶ Pico W ──Wi-Fi AP──▶ phone browser
-                                        │                     (viewer)
-                                        └─ serves index.html + SSE stream
-```
+## Files
 
----
+| File | Goes on the board as | What it is |
+|---|---|---|
+| `main.py` | `main.py` | AP + web server + telemetry source |
+| `index.html` | `index.html` | The viewer (network-aware build) |
 
-## Install
+Total ~61 KB. The Pico W has roughly 1.4 MB of filesystem free after
+MicroPython, so space is not a concern.
 
-1. Flash MicroPython for Pico W (the `rp2-pico-w` UF2) from
-   [micropython.org](https://micropython.org/download/RPI_PICO_W/).
-2. Copy `main.py` to the board as `main.py`.
-3. Copy `index.html` to the board as `index.html`.
-4. Reset the board. The onboard LED goes solid once the AP is up.
+## Setup
 
-Both files go in the board's filesystem root. Any tool works — `mpremote`,
-Thonny, `rshell`:
+1. **Flash MicroPython.** Download the `rp2-pico-w` UF2 from
+   micropython.org. Hold BOOTSEL, plug in, drop the UF2 on the `RPI-RP2`
+   drive. Make sure it's the **Pico W** build — the plain Pico build has no
+   networking and `import network` will fail.
 
-```
-mpremote cp main.py :main.py
-mpremote cp index.html :index.html
-mpremote reset
-```
+2. **Install Thonny** (or `mpremote`/`rshell` if you prefer). Set the
+   interpreter to *MicroPython (Raspberry Pi Pico)*.
+
+3. **Copy both files to the board.** In Thonny: open each file, then
+   *File → Save as… → Raspberry Pi Pico*. Names must be exactly `main.py`
+   and `index.html`.
+
+4. **Reset the board.** `main.py` runs automatically on boot.
 
 ## Use
 
-| | |
-|---|---|
-| Phone Wi-Fi | join **`ROCKET-GS`** |
-| Browser | **http://192.168.4.1** |
+1. Phone Wi-Fi → join **`ROCKET-GS`**, password **`rocket12345`**
+2. Browser → **http://192.168.4.1**
 
-The LED pulses slowly while idle and holds steady while someone is streaming.
+Android may warn that the network has no internet and offer to switch back
+to mobile data — choose to stay connected. On iOS, turn off *Wi-Fi Assist*
+if it keeps dropping you.
 
-> ⚠️ **The Wi-Fi password is a default in plain text in `main.py`.** Change it
-> before any public demonstration — see §14 of the design document.
+The onboard LED blinks slowly when idle and goes solid while someone is
+streaming.
+
+## What you'll see
+
+The viewer detects it's being served over HTTP and switches from Web Serial
+to Server-Sent Events automatically. The serial-mode buttons are replaced
+with a **source selector**:
+
+- **Bench wobble** (default) — gentle motion, like the board on a desk.
+  This is the realistic case for checking the UI.
+- **Flight profile** — a full flight on a 40 s loop: 1.6 s burn at 5 g,
+  apogee near 377 m, 78 m/s peak ascent, chute descent at 6 m/s, tipping
+  over after apogee. Use this to check the readouts and charts survive real
+  flight numbers.
+- **Hold still** — flat output, for checking noise and drift behaviour.
+
+The flight profile deliberately hits 6 g, which would clip a ±2 g
+accelerometer. That's intentional — it's a real limitation and the viewer
+should show it rather than hide it.
 
 ## Endpoints
 
-| Endpoint | Purpose |
+| Path | Purpose |
 |---|---|
 | `/` | The viewer |
-| `/stream` | Server-Sent Events, one telemetry frame per event |
-| `/health` | JSON — mode, frame count, client count, free RAM, uptime |
-| `/mode?m=` | Switch the synthetic source: `bench`, `flight`, `still` |
+| `/stream` | SSE telemetry, one `V,...` frame per event |
+| `/health` | JSON status — mode, frame count, clients, free RAM, uptime |
+| `/mode?m=bench\|flight\|still` | Switch the synthetic source |
 
-`/health` is the one to hit from a laptop when something looks wrong:
+`/health` is useful from a laptop while debugging:
+`curl http://192.168.4.1/health`
 
-```
-curl http://192.168.4.1/health
-```
+## Configuration
 
-## Synthetic sources
+At the top of `main.py`:
 
-Until the radio exists, three profiles are selectable from the viewer's
-dropdown or via `/mode`:
-
-| Mode | What it does |
-|---|---|
-| `bench` | Gentle desk-scale motion. The default, and the realistic case for UI work |
-| `flight` | A 40 s loop: 1.6 s burn at 5 g, 377 m apogee, 78 m/s peak ascent, 6 m/s chute descent, tipping after apogee |
-| `still` | Flat output, for noise and drift checks |
-
-The `flight` profile deliberately peaks at 6 g, which clips a ±2 g
-accelerometer. That clipping is real and the display should show it rather
-than hide it.
-
-## Wire format
-
-One line format is shared by the serial path and the Wi-Fi path, so the viewer
-has a single parser regardless of how frames arrive (§6.6):
-
-```
-V,ax,ay,az,gx,gy,gz,alt,vel[,millis]
+```python
+SSID     = "ROCKET-GS"
+PASSWORD = "rocket12345"     # WPA2 needs 8+ characters
+CHANNEL  = 6
+RATE_HZ  = 25
 ```
 
-Accelerations in g, rates in dps, altitude in metres AGL, velocity in m/s. The
-tenth field is the flight computer's own `millis()`.
-
-**That timestamp matters more than it looks.** Without it the receiver derives
-`dt` from packet *arrival* time, and USB and radio both deliver in bursts —
-several frames land microseconds apart, then a gap. That jitter feeds straight
-into attitude integration as noise. Timestamping at the source removes it, and
-it is the only thing that makes the arrival-time jitter of a lossy RF link
-harmless to the attitude estimate. **Keep this field when the radio is wired
-in.**
+Change the password before any public demo — it's in plain text and anyone
+who reads this repo can join your network.
 
 ## Wiring in the radio
 
-The architecture already supports it and **the viewer needs no changes at
-all.** `main.py` is built around one producer and many consumers: a single
-task advances the telemetry state at a fixed rate, and every connected browser
-reads the most recent frame. Replacing the synthetic producer with a packet
-reader is the whole job.
+The wire format (§6.6) is identical to what the flight sketch already emits
+over serial (`V,ax,ay,az,gx,gy,gz,alt,vel,ms`), so the viewer needs **no
+changes**. Keep the trailing `ms` field when the radio goes in: it is the
+flight computer's own `millis()`, and it is the only thing that makes the
+arrival-time jitter of a lossy RF link harmless to the attitude estimate.
 
-See the block marked `RADIO HOOK` near the bottom of `main.py` for the sketch
-of it — a UART reader that keeps the most recent `V,...` line, added to
-`main()` as another asyncio task, with the SSE loop reading from it instead of
-`tel.frame()`.
+The architecture is already producer/consumer: one task produces frames, any
+number of browsers consume them.
 
-Ground-side conversion from the 18-byte packed LoRa packet (§6.2) to this line
-format is a formatting step in the receiver.
+Replace the `sampler()` task with a packet reader:
 
-## Two settings that are not optional
+```python
+from machine import UART, Pin
+uart = UART(0, 115200, tx=Pin(0), rx=Pin(1))
 
-Both were found the hard way and both look like intermittent stutter:
+async def radio_reader():
+    buf = b""
+    while True:
+        if uart.any():
+            buf += uart.read()
+            while b"\n" in buf:
+                line, buf = buf.split(b"\n", 1)
+                line = line.strip()
+                if line.startswith(b"V,"):
+                    tel.latest = line.decode()   # consumers pick this up
+        await asyncio.sleep(0.005)
+```
 
-- **Wi-Fi power management disabled** (`ap.config(pm=0xa11140)`). The CYW43
-  radio parks itself between packets by default. Fine for request/response,
-  visible as stutter on a continuous 25 Hz stream. Costs roughly 20–30 mA of
-  idle current — irrelevant on a ground power bank.
-- **Nagle's algorithm disabled** on the stream socket. Telemetry frames are
-  ~60 bytes; Nagle withholds a small packet until the previous is ACKed, and
-  phones delay ACKs by up to ~200 ms. The interaction produces exactly the
-  intermittent multi-frame stall it was reported as.
+Then swap `asyncio.create_task(sampler())` for
+`asyncio.create_task(radio_reader())` in `main()`.
 
-## Notes and limits
+Worth adding at the same time: a staleness check, so the viewer can tell
+"radio silent" apart from "rocket sitting still." Both look like unchanging
+numbers otherwise.
 
-- **AP-only**, comfortable with roughly 4 clients. It is a team tool, not a
-  spectator server.
-- **One producer, many consumers.** The first version advanced the simulation
-  inside each client's stream loop, which made it run at 2× with two phones
-  connected and made the two viewers disagree. Verified after the fix: three
-  simultaneous clients each receive 25.0 Hz of byte-identical frames while the
-  source advances at 1×. Keep that property.
-- **The viewer is served from flash in chunks**, not read into RAM — the Pico W
-  does not have the headroom to hold a ~45 KB file and a socket buffer
-  comfortably at the same time.
-- **No telemetry staleness timeout yet.** "Radio silent" and "vehicle sitting
-  perfectly still" currently look identical on the display. This is a
-  safety-relevant display defect, not a nicety — see §14.
+## Verified before release
 
-## Troubleshooting
+- All routes return correct status codes and content types
+- `index.html` serves byte-identical to disk (md5 match) via chunked reads
+- SSE sustains 25.0 Hz with monotonic timestamps (40.6 ms mean interval)
+- Three simultaneous clients each get full 25 Hz and **identical** frames,
+  with the simulation still advancing at 1× — not 3×
+- Flight profile physics check out: 377 m apogee, 78.5 m/s, 6.01 g peak,
+  monotonic ascent
+- Viewer parses and runs under both `file://` (serial) and `http://`
+  (network) modes
+
+## Mobile smoothness
+
+If the display stutters on a phone, these are already addressed — noted here
+because they're the things to check first if it ever comes back.
+
+**Client side.** The original render loop called `getBoundingClientRect()`
+and reassigned `canvas.width` on all four canvases *every frame*. Reassigning
+canvas width reallocates and clears the backing buffer; `getBoundingClientRect`
+forces a synchronous layout reflow. Measured over 2 s at 60fps that was 480
+reflows and 480 buffer reallocations — now 4 of each, one per canvas, re-measured
+only on resize or rotation. Also added: pixel-ratio capped at 1.5 on touch
+devices (at DPR 3 a full-width canvas is ~9x the pixels for detail nobody can
+see at arm's length), render capped at 30fps and charts at 10fps on mobile
+since telemetry only arrives at 25 Hz, DOM writes skipped when the formatted
+string hasn't changed, and drawing halted entirely when the tab is hidden.
+
+**Server side.** Two fixes:
+
+- **Wi-Fi power management disabled** (`pm=0xa11140`). The CYW43 radio parks
+  itself between packets by default. That's fine for request/response traffic
+  but shows up as a stutter on a steady 25 Hz stream.
+- **Nagle's algorithm disabled** on the SSE socket. Frames are ~60 bytes;
+  Nagle holds a small packet until the previous is ACKed, and phones delay
+  ACKs by up to ~200 ms. Together those produce exactly the intermittent
+  multi-frame stall this was reported as.
+
+If stutter persists, the next things to look at are phone Wi-Fi power saving
+(some Android builds throttle aggressively on networks with no internet) and
+distance from the Pico W — its antenna is small.
+
+## If something's wrong
 
 | Symptom | Cause |
 |---|---|
-| `index.html is not on the board` | The viewer was not copied. Copy it as `index.html` and reset. |
-| AP never comes up (LED keeps blinking) | Not a Pico **W**, or non-W MicroPython flashed. |
+| `index.html is not on the board` | The viewer wasn't copied. Copy it as `index.html` and reset. |
+| AP never comes up, LED keeps blinking | Plain Pico, or non-W MicroPython flashed. `import network` needs the Pico **W** build. |
 | Stream stutters in multi-frame bursts | Power management or Nagle re-enabled — see above. |
-| Two phones show different data | The producer is being advanced per client. See §6.5. |
+| Two phones disagree | The producer is being advanced per client rather than once. See §6.5. |
+
+## Known limits
+
+- **Synthetic data.** Nothing here reflects a real sensor yet.
+- **AP mode only.** The Pico W can't be an access point and join another
+  network at the same time in this configuration.
+- **Roughly 4 clients.** The Pico W's AP is fine for a small team; it isn't
+  a venue-wide server.
+- **No HTTPS.** Fine on an isolated field network; don't reuse the password
+  anywhere that matters.
+- **Phone screen sleep** will pause the stream. SSE reconnects on wake, but
+  you'll have a gap in the charts.
+- **Disabling Wi-Fi power management raises idle current** by roughly 20-30 mA.
+  Irrelevant on a power bank; worth knowing if you ever run the ground station
+  from a small cell.
