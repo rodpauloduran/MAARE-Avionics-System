@@ -1,0 +1,41 @@
+# --- OneDrive / Windows ---
+desktop.ini
+Thumbs.db
+ehthumbs.db
+$RECYCLE.BIN/
+*.lnk
+
+# --- macOS (in case anyone clones on a Mac) ---
+.DS_Store
+
+# --- Python / MicroPython ---
+__pycache__/
+*.py[cod]
+*.mpy
+.venv/
+venv/
+env/
+
+# --- Arduino build output ---
+build/
+*.elf
+*.hex
+*.uf2
+*.bin
+
+# --- Editors ---
+.vscode/
+.idea/
+*.swp
+*~
+
+# --- Office lock files (Excel leaves these next to an open .xlsx) ---
+~$*
+*.tmp
+
+# --- Flight data ---
+# Logs are dumped over USB serial as CSV. Keep raw captures out of the repo
+# by default; commit a flight deliberately, under a named folder, if it is
+# worth keeping.
+*.csv
+!docs/**/*.csv
