@@ -303,9 +303,9 @@ function qConj(q){ return [q[0],-q[1],-q[2],-q[3]]; }
 
       The integral term matters more than it looks. With proportional
       feedback alone, any residual gyro bias parks the estimate at a
-      PERMANENT offset of roughly bias/KP — about 0.4 deg per dps — which
-      is why a leveled board used to come back to "nearly" zero instead of
-      zero. The integral term learns that bias online and cancels it.
+      PERMANENT offset of roughly bias/KP — about 0.4 deg per dps — so a
+      leveled board settles at "nearly" zero instead of zero. The integral
+      term learns that bias online and cancels it.
    ============================================================ */
 const KP = 2.4;          // how hard gravity pulls the estimate straight
 const KI = 0.08;         // how fast the residual gyro bias is learned
@@ -658,10 +658,10 @@ const stripTilt=Strip('chTilt','#C0392B');
 /* ============================================================
    6. Telemetry state + parsing
       Expected line:  V,ax,ay,az,gx,gy,gz,alt,vel[,millis]
-      The 10th field is optional: rev B firmware sends the board's own
+      The 10th field is optional: the firmware sends the board's own
       millis(). Using it instead of PC arrival time removes the timing
-      jitter caused by USB delivering frames in bursts, which was feeding
-      noise straight into the attitude integration.
+      jitter caused by USB delivering frames in bursts, which otherwise
+      feeds noise straight into the attitude integration.
    ============================================================ */
 const tel={
   ax:0,ay:0,az:1,gx:0,gy:0,gz:0,alt:0,vel:0,

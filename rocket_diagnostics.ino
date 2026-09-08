@@ -1,21 +1,30 @@
 // =============================================================================
-//  ROCKET AVIONICS — BENCH DIAGNOSTICS  (rev B)
+//  ROCKET AVIONICS — BENCH DIAGNOSTICS
 //  MS5611 barometer + LSM6 accelerometer/gyro  ->  Serial Monitor / viewer
 //
-//  CHANGES FROM REV A
-//  ------------------
-//  1. GYRO RANGE.  imu.enableDefault() sets the gyro to +/-245 dps, NOT
-//     +/-1000 dps.  Rev A paired that default with a 0.035 dps/LSB constant,
-//     which is the +/-1000 dps figure, so every rate was reported 4x too high
-//     and saturated above 245 dps.  This sketch now writes CTRL2_G explicitly
-//     and derives the scale factor from the register, so the two can no longer
-//     disagree.
-//  2. SCALE FACTORS ARE READ BACK FROM THE CHIP, not hard-coded.  If a future
-//     edit changes a range, the conversion follows automatically.
-//  3. GYRO BIAS is measured at startup and subtracted.  Command 'b' redoes it.
-//  4. SATURATION IS DETECTED and reported, on both sensors.
-//  5. Timing constants corrected for the 25 Hz sample rate (noise window,
-//     summary interval, velocity filter), plus a resync after blocking calls.
+//  Reports interpreted values — degC, hPa, metres AGL, m/s, g, degrees tilt —
+//  rather than raw counts, so a wrong reading is obvious on sight.  The most
+//  useful single output is the running 1-sigma altitude noise, which is what
+//  sets APOGEE_DROP_M and therefore how far past apogee deployment fires.
+//
+//  DESIGN RULES THIS SKETCH FOLLOWS
+//  --------------------------------
+//  1. SCALE FACTORS ARE READ BACK FROM THE CHIP, never hard-coded.  A constant
+//     is a silent claim about a register you cannot see; a readback makes a
+//     wrong range show up as a wrong PRINTED range at boot.  Note that
+//     imu.enableDefault() selects +/-245 dps, so pairing it with the 0.035
+//     dps/LSB constant that belongs to +/-1000 dps reports every rate 4x high
+//     and saturates silently above 245 dps.
+//  2. THE BAROMETER IS STARTED WITH reset(), NOT begin().  On Mbed cores
+//     begin() fails to detect a working MS5611 — see the note in setup().
+//  3. GYRO BIAS is measured at startup and subtracted.  Command 'b' redoes it
+//     as the board warms.
+//  4. SATURATION IS DETECTED and reported on both sensors, separately from the
+//     range-ceiling warning.  A clipped reading is not a large reading, it is
+//     an unknown one.
+//  5. TIMING CONSTANTS ARE TIED TO THE 25 Hz SAMPLE RATE — noise window,
+//     summary interval and velocity filter all move if the rate changes.
+//     Blocking calls resync the schedule rather than burst to catch up.
 //
 //  Wiring (Raspberry Pi Pico, official Arduino Mbed core):
 //    Wire defaults to GP4 = SDA, GP5 = SCL on this board.
@@ -118,7 +127,7 @@ void pad(float value, int width, int decimals) {
 //  Configure the IMU, then ask the chip what it is actually set to and derive
 //  the conversion constants from the answer.
 //
-//  This is the whole point of rev B.  A hard-coded scale factor is a silent
+//  This matters more than it looks.  A hard-coded scale factor is a silent
 //  claim about a register you cannot see.  Reading it back means a wrong range
 //  becomes a wrong PRINTED range, which you will notice.
 // -----------------------------------------------------------------------------
@@ -248,7 +257,7 @@ void setup() {
   while (!Serial && millis() - t0 < 4000) { }
 
   Serial.println();
-  Serial.println(F("=== ROCKET AVIONICS BENCH DIAGNOSTICS  rev B ==="));
+  Serial.println(F("=== ROCKET AVIONICS BENCH DIAGNOSTICS ==="));
   Serial.println();
 
   Wire.begin();

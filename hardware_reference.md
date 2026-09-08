@@ -3,8 +3,7 @@
 Target: Raspberry Pi Pico (RP2040), **official Arduino Mbed OS RP2040 core**
 (not the Earle Philhower community core).
 
-> **Authority.** `avionics_documentation.md` (Revision B) is the design
-> authority. This file is the quick bench reference - pin numbers, addresses,
+> **Authority.** `avionics_documentation.md` is the design authority. This file is the quick bench reference - pin numbers, addresses,
 > driver gotchas, bring-up order. Where the two disagree, the design document
 > wins. Sections below cite it as §n.
 >
@@ -158,11 +157,10 @@ Write CTRL1_XL and CTRL2_G directly. Raw values land in `imu.a.x/y/z` and
 `imu.g.x/y/z` as int16.
 
 **Never hard-code the scale factor — read it back from the register (§4.3).**
-This cost a debugging session: pairing `enableDefault()` with a `0.035` dps/LSB
-constant (the ±1000 dps figure) while the chip was actually at ±245 dps
-reported every rate **4x too high**, and saturated silently above 245 dps. Note
-also the non-obvious encoding — for the accelerometer, `01` = **±16 g**, not
-±4 g.
+`enableDefault()` selects ±245 dps, so pairing it with the `0.035` dps/LSB
+constant that belongs to ±1000 dps reports every rate **4x too high** and
+saturates silently above 245 dps. Note also the non-obvious encoding — for the
+accelerometer, `01` = **±16 g**, not ±4 g.
 
 ```cpp
 uint8_t c2 = imu.readReg(LSM6::CTRL2_G);
@@ -188,7 +186,7 @@ range ceiling" warning.
 subtract that offset from every subsequent reading. Skip this and your attitude
 estimate drifts visibly within seconds. (`rocket_diagnostics.ino` uses 250 at
 25 Hz — enough for bench work, and re-runnable in place with the `b` command
-as the board warms. Flight firmware should take the full 400-500.)
+as the board warms. Flight firmware takes the full 400-500.)
 
 ### ADXL375
 
@@ -312,8 +310,8 @@ struct __attribute__((packed)) Sample {
 ```
 
 **4000** samples x 28 B = **112 KB**. The RP2040 has 264 KB, but Mbed OS itself
-consumes ~40-60 KB, so the 6000-sample / 168 KB figure from earlier drafts does
-not fit on this core (§10.1).
+consumes ~40-60 KB, so the buffer is sized against roughly 200 KB of usable
+RAM, not the full 264 KB (§10.1).
 
 At 500 Hz, 4000 samples is 8 seconds — the full flight plus pre-trigger.
 

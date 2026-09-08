@@ -1,15 +1,15 @@
 # Water Rocket Avionics System — Design Documentation
 
-**Revision B · September 2026**
-Mapúa University (Intramuros) — rocketry group, pre-organisation phase
+**v0.1 · September 2026**
+Mapúa University (Intramuros)
 
-> **Changes in Revision B.** Ground segment software now exists and is
-> working: a 3D attitude viewer (§6.7) and a Pico W ground station serving it
-> over its own Wi-Fi (§6.5). Two firmware defects were found and fixed during
-> bring-up — an I²C detection failure specific to Mbed cores (§4.2, §10.1) and
-> a 4× gyro scale error (§4.3). Attitude filter design for the tilt inhibit is
-> now specified with measured numbers (§5.5). Bench diagnostics sketch
-> advanced to rev B (§13.2).
+> **What is built.** The barometer and IMU are on the flight computer and the
+> bench diagnostics sketch works (§13.2). The ground segment — a 3D attitude
+> viewer (§6.7) and a Pico W ground station serving it over its own Wi-Fi
+> (§6.5) — works on synthetic telemetry. Nothing else is connected: no high-g
+> accelerometer, GPS, radio link, deployment hardware or airframe. This
+> document specifies the whole system; treat anything outside §13.2 and §6.5
+> as design intent rather than description.
 
 ---
 
@@ -265,15 +265,15 @@ Note the LSM6DSO's non-obvious full-scale encoding: **`01` = ±16 g**, not ±4 g
 
 **Never hard-code a scale factor. Read it back from the register.**
 
-This is not a style preference; it cost us a debugging session. The bench
-sketch paired `enableDefault()` with a `0.035` dps/LSB constant — the correct
-figure for ±1000 dps. But `enableDefault()` selects **±245 dps**, whose
-sensitivity is `0.00875`. Every angular rate was therefore reported **4×
-too high**, and anything above 245 dps silently saturated.
+This is not a style preference. `enableDefault()` selects **±245 dps**, whose
+sensitivity is `0.00875` — so pairing it with the `0.035` dps/LSB constant that
+belongs to ±1000 dps reports every angular rate **4× too high** and silently
+saturates anything above 245 dps.
 
-The symptom was misleading. Slow motion looked fine, because gravity dominates
-the attitude estimate at low rates and pulled it back to truth. Fast motion
-overshot wildly and oscillated, because it is gyro-dominated. A deliberate
+The symptom of that mismatch is misleading, which is what makes it dangerous.
+Slow motion looks fine, because gravity dominates the attitude estimate at low
+rates and pulls it back to truth. Fast motion overshoots wildly and oscillates,
+because it is gyro-dominated. A deliberate
 180° flip could integrate toward 720° before clipping ate into it. Nothing in
 the output said "scale factor wrong" — it said "the filter is unstable."
 
@@ -502,17 +502,16 @@ physical pose:
 For a threshold that gates parachute deployment, this is not a cosmetic
 difference.
 
-**Zeroing must not reset the filter state.** An early viewer build implemented
-"level here" by resetting the tracked quaternion to identity. It did not work,
-and the reason generalises: the accelerometer correction term pulls the
-estimate back to true gravity within a fraction of a second, so any residual
-tilt reappears almost immediately. The correct approach is to record the
-current orientation as a *display reference* and leave the filter tracking
+**Zeroing must not reset the filter state.** Implementing "level here" by
+resetting the tracked quaternion to identity does not work: the accelerometer
+correction term pulls the estimate back to true gravity within a fraction of a
+second, so any residual tilt reappears almost immediately. Record the current
+orientation as a *display reference* instead, and leave the filter tracking
 truth. Any flight-side "zero attitude" command must follow the same rule —
 the estimator's job is to be correct, not to agree with a button press.
 
-Returning to a levelled pose now reads ≈ 0.04° residual, down from a visible
-drift. What remains is sensor noise, not systematic error.
+Done this way, returning to a levelled pose reads ≈ 0.04° residual. What
+remains is sensor noise, not systematic error.
 
 ---
 
@@ -631,11 +630,11 @@ remains on the Mbed Arduino core per §9.2.
 
 **Architecture: one producer, many consumers.** A single task advances the
 telemetry state at a fixed rate; every connected browser reads the most recent
-frame. This was not the first design — the initial version advanced the source
-inside each client's stream loop, which made the simulation run at 2× with two
-phones connected and caused the two viewers to disagree. Verified after the
-fix: three simultaneous clients each receive 25.0 Hz of byte-identical frames
-while the source advances at 1×.
+frame. The distinction matters: advancing the source inside each client's
+stream loop instead makes the simulation run at 2× with two phones connected
+and makes the two viewers disagree with each other. Verified as built: three
+simultaneous clients each receive 25.0 Hz of byte-identical frames while the
+source advances at 1×.
 
 That structure is also the correct shape for the radio: the packet receiver
 becomes the producer and nothing else changes.
@@ -706,8 +705,8 @@ the phone to open a port.
 
 **Two builds are kept, deliberately.** `rocket_attitude_viewer.html` is the
 dual-transport build above, and is what the ground station serves as its
-`index.html`. `rocket_attitude_viewer_serial.html` is an earlier serial-only
-build, retained because it is the transport that **works today**: with no radio
+`index.html`. `rocket_attitude_viewer_serial.html` is a serial-only build,
+kept because it is the transport that **works today**: with no radio
 between the flight computer and the ground station yet, driving the viewer
 directly off the flight computer over USB is the only path carrying real sensor
 data. It is a bench instrument, not a dead file. Retire it once the radio link
@@ -1082,7 +1081,7 @@ address does not appear, stop and fix it — do not proceed hoping.**
 
 ### 13.2 Bench diagnostics
 
-A standalone sketch (`rocket_diagnostics.ino`, **rev B**) reports interpreted
+A standalone sketch (`rocket_diagnostics.ino`) reports interpreted
 values — °C, hPa, metres AGL, m/s, g, degrees tilt — plus:
 
 - I²C scan (with the §10.1 dummy-byte fix) and per-device pass/fail at boot
@@ -1103,14 +1102,17 @@ values — °C, hPa, metres AGL, m/s, g, degrees tilt — plus:
 
 **Status: verified working.**
 
-**Rev B changelog.** Rev A used `begin()` (failed to detect the MS5611 on this
-core, §4.2) and paired `enableDefault()` with a ±1000 dps scale constant while
-the chip was actually at ±245 dps, reporting all rates 4× high (§4.3). Rev B
-also corrects three timing constants that rev A left stale when the sample rate
-moved from 10 Hz to 25 Hz — the noise window had silently shrunk from 4 s to
-1.6 s (which *under*-estimates barometer wander and would have suggested an
-`APOGEE_DROP_M` that is too tight), the periodic summary fired every 2 s
-instead of 5 s, and the velocity filter smoothed over 2.5× less real time.
+**Timing constants are tied to the sample rate.** The sketch runs at 25 Hz, and
+three constants must be sized against it or they quietly measure the wrong
+thing:
+
+| Constant | Value | Why it matters |
+|---|---|---|
+| Noise window | 100 samples = **4 s** | A shorter window *under*-estimates barometer wander and suggests an `APOGEE_DROP_M` that is too tight |
+| Summary interval | 125 samples = **5 s** | Readable pacing for the interpreted block |
+| Velocity filter | `0.88 / 0.12` | The same time constant `0.7 / 0.3` gives at 10 Hz |
+
+If the sample rate is ever changed, all three move with it.
 
 **Measurement discipline.** Take the 1σ altitude noise figure with viewer
 smoothing **off** (§6.7). Smoothed data reads roughly 4.7× quieter than the
@@ -1175,18 +1177,15 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 - **Ground station is AP-only** and comfortable with roughly 4 clients. It is a
   team tool, not a spectator server.
 
-**Closed since Revision A:**
+**What is built and working:**
 
-- [x] MS5611 detection failure diagnosed and worked around (§4.2)
-- [x] Gyro scale-factor defect found and structurally fixed via register
-      readback (§4.3)
-- [x] Bench diagnostics advanced to rev B, including gyro bias calibration and
-      saturation detection (§13.2)
-- [x] Attitude viewer built, with dual serial/Wi-Fi transport (§6.7)
-- [x] Pico W ground station built and working on hardware (§6.5)
-- [x] Telemetry wire format defined and shared across both transports (§6.6)
-- [x] Attitude filter upgraded to PI with online bias estimation; tilt made
-      yaw-immune (§5.5)
+- [x] Barometer and IMU on the flight computer; bench diagnostics running
+      interpreted output, noise statistics and saturation flags (§13.2)
+- [x] Attitude viewer, with dual serial/Wi-Fi transport (§6.7)
+- [x] Pico W ground station, serving the viewer over its own Wi-Fi (§6.5)
+- [x] Telemetry wire format, shared across both transports (§6.6)
+- [x] Attitude filter: Mahony PI with online bias estimation, yaw-immune tilt —
+      ground-side only (§5.5)
 
 **Open items:**
 
@@ -1226,7 +1225,7 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 | `water_rocket_avionics_bom.xlsx` | Full bill of materials, costs, suppliers, phasing, per-part justification |
 | `airframe_build_spec.md` | Airframe structure, materials, dimensions, assembly sequence |
 | `hardware_reference.md` | Quick bench reference — pin map, addresses, per-sensor driver notes, bring-up order. Kept in sync with this document; **this document is the authority** where the two disagree |
-| `rocket_diagnostics.ino` | Bench diagnostics sketch, **rev B** (verified working) |
+| `rocket_diagnostics.ino` | Bench diagnostics sketch (verified working on hardware) |
 | `rocket_flight.ino` | Flight firmware skeleton — state machine, threading, telemetry. **Not written** (§14) |
 | `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Self-contained; Web Serial over USB or SSE over Wi-Fi (§6.7) |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer. The bench path that works *today*, driving the viewer straight off the flight computer over USB while the flight-to-ground radio does not yet exist (§6.7) |
@@ -1238,29 +1237,25 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 **External references:**
 
-- ESRA IREC Rules & Requirements, and the Design, Test & Evaluation Guide
-  (DTEG) — `esrarocket.org`
 - OpenRocket — flight simulation and stability analysis
 - NTC Memorandum Circulars on short-range devices — `ntc.gov.ph`
 
 ---
 
-*Revision B — September 2026. This document reflects design intent and
-analysis, much of it first-order rather than validated. Numbers marked as
-estimates should be confirmed by test or FEA before they are relied upon for
-flight safety.*
+*v0.1 — September 2026. This document reflects design intent and analysis,
+much of it first-order rather than validated. Numbers marked as estimates
+should be confirmed by test or FEA before they are relied upon for flight
+safety.*
 
-*What changed in B is mostly ground segment: the viewer and ground station now
-exist and work, and two firmware defects were found and fixed during that work.
-The flight-critical path is materially unchanged — the deployment state machine
-remains unflown, the tilt inhibit remains unimplemented, and no part of the
-telemetry chain has yet carried a real sensor reading over the air. Treat the
-§5.5 filter figures as evidence the algorithm is correct, not as evidence it
-survives a 50 g boost.*
+*The flight-critical path is unproven: the deployment state machine is unflown,
+the tilt inhibit is unimplemented, and no part of the telemetry chain has
+carried a real sensor reading over the air. Treat the §5.5 filter figures as
+evidence the algorithm is correct, not as evidence it survives a 50 g boost.*
 
-*Two defects in Revision A are worth remembering as a class, not as
-incidents. Both were silent: the MS5611 reported itself absent while working
-perfectly, and the gyro reported every rate 4× high while looking merely
-"unstable." Neither announced itself as a configuration error. The structural
-response — read configuration back from the hardware and print it at boot — is
-cheap, and is now the standing expectation for any new device on this bus.*
+*Two failure modes on this platform are worth holding onto as a class, because
+both are silent. The MS5611 can report itself absent while working perfectly
+(§4.2), and the gyro can report every rate 4× high while looking merely
+"unstable" (§4.3). Neither announces itself as a configuration error. The
+structural response — read configuration back from the hardware and print it at
+boot — is cheap, and is the standing expectation for any new device on this
+bus.*

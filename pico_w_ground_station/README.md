@@ -131,7 +131,7 @@ Worth adding at the same time: a staleness check, so the viewer can tell
 "radio silent" apart from "rocket sitting still." Both look like unchanging
 numbers otherwise.
 
-## Verified before release
+## Verified on hardware
 
 - All routes return correct status codes and content types
 - `index.html` serves byte-identical to disk (md5 match) via chunked reads
@@ -145,21 +145,22 @@ numbers otherwise.
 
 ## Mobile smoothness
 
-If the display stutters on a phone, these are already addressed — noted here
-because they're the things to check first if it ever comes back.
+Phone rendering is where this page is easiest to get wrong. These are the
+things that keep it smooth — and the first things to check if stutter appears.
 
-**Client side.** The original render loop called `getBoundingClientRect()`
-and reassigned `canvas.width` on all four canvases *every frame*. Reassigning
-canvas width reallocates and clears the backing buffer; `getBoundingClientRect`
-forces a synchronous layout reflow. Measured over 2 s at 60fps that was 480
-reflows and 480 buffer reallocations — now 4 of each, one per canvas, re-measured
-only on resize or rotation. Also added: pixel-ratio capped at 1.5 on touch
-devices (at DPR 3 a full-width canvas is ~9x the pixels for detail nobody can
-see at arm's length), render capped at 30fps and charts at 10fps on mobile
-since telemetry only arrives at 25 Hz, DOM writes skipped when the formatted
-string hasn't changed, and drawing halted entirely when the tab is hidden.
+**Client side.** Canvas sizes are measured once and cached, not per frame.
+Calling `getBoundingClientRect()` forces a synchronous layout reflow, and
+reassigning `canvas.width` reallocates and clears the backing buffer; doing
+either every frame across four canvases costs 480 reflows and 480
+reallocations per 2 s at 60 fps, against 4 of each when sizes are re-measured
+only on resize or rotation. On top of that: pixel ratio is capped at 1.5 on
+touch devices (at DPR 3 a full-width canvas is ~9x the pixels, for detail
+nobody can see at arm's length), render is capped at 30 fps with charts at
+10 fps on mobile since telemetry only arrives at 25 Hz, DOM writes are skipped
+when the formatted string is unchanged, and drawing halts entirely when the tab
+is hidden.
 
-**Server side.** Two fixes:
+**Server side.** Two settings:
 
 - **Wi-Fi power management disabled** (`pm=0xa11140`). The CYW43 radio parks
   itself between packets by default. That's fine for request/response traffic
@@ -169,9 +170,9 @@ string hasn't changed, and drawing halted entirely when the tab is hidden.
   ACKs by up to ~200 ms. Together those produce exactly the intermittent
   multi-frame stall this was reported as.
 
-If stutter persists, the next things to look at are phone Wi-Fi power saving
-(some Android builds throttle aggressively on networks with no internet) and
-distance from the Pico W — its antenna is small.
+If stutter appears anyway, the next things to look at are phone Wi-Fi power
+saving (some Android builds throttle aggressively on networks with no internet)
+and distance from the Pico W — its antenna is small.
 
 ## If something's wrong
 

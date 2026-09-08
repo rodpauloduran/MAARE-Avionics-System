@@ -3,7 +3,7 @@
 Student-designed and student-researched (SRAD) flight computer for a water
 pressure rocket. The vehicle is a testbed; **the avionics are the deliverable.**
 
-Mapúa University (Intramuros) — rocketry group, pre-organisation phase.
+Mapúa University (Intramuros).
 
 ---
 
@@ -30,7 +30,7 @@ built hardware.**
 
 The design document is deliberately ahead of the hardware — that is its job.
 Read it as a specification, not a description. `avionics_status_report.md`
-tracks progress against it, and `CHANGELOG.md` records what changed when.
+tracks where the build has got to.
 
 ---
 
@@ -51,7 +51,7 @@ that transfers directly to high-power rocketry.
 ## Start here
 
 **[`avionics_documentation.md`](avionics_documentation.md)** — the design
-document (Revision B) and the authority for this project. Everything else is
+document and the authority for this project. Everything else is
 either a companion spec or an implementation of something it specifies. If two
 documents disagree, that one wins.
 
@@ -59,12 +59,12 @@ documents disagree, that one wins.
 
 | Path | What it is |
 |---|---|
-| [`avionics_documentation.md`](avionics_documentation.md) | **Design document, Revision B.** Sensors, deployment logic, radio, power, recovery, firmware, regulatory, test plan |
+| [`avionics_documentation.md`](avionics_documentation.md) | **Design document.** Sensors, deployment logic, radio, power, recovery, firmware, regulatory, test plan |
 | [`hardware_reference.md`](hardware_reference.md) | Quick bench reference — pin map, I²C addresses, driver gotchas, bring-up order |
 | [`airframe_build_spec.md`](airframe_build_spec.md) | Airframe structure, materials, dimensions, assembly sequence |
 | [`avionics_status_report.md`](avionics_status_report.md) | Project status summary |
 | `water_rocket_avionics_bom.xlsx` | Bill of materials — costs, suppliers, phasing, per-part justification |
-| `rocket_diagnostics.ino` | Bench diagnostics sketch, **rev B** (verified working) |
+| `rocket_diagnostics.ino` | Bench diagnostics sketch (verified working on hardware) |
 | `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Web Serial over USB, or SSE over Wi-Fi |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer — the bench path that works today |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each version |
@@ -110,20 +110,21 @@ still be true once everything is wired:
 
 §14 of the design document keeps the full list.
 
-## Two defects worth remembering as a class
+## Two silent failure modes on this platform
 
-Both were found during Revision B bring-up, and both were **silent**:
+Both look like something other than what they are, which is what makes them
+worth knowing before you meet them:
 
-- The **MS5611 reported itself absent while working perfectly** — a
+- The **MS5611 can report itself absent while working perfectly.** A
   zero-length I²C `endTransmission()` on Mbed cores issues a read-type
-  transaction the sensor won't ACK.
-- The **gyro reported every rate 4× too high** while merely looking
-  "unstable" — `enableDefault()` selects ±245 dps, not the ±1000 dps the
-  hard-coded scale constant assumed.
+  transaction the sensor won't ACK, so detection fails on a healthy part.
+- The **gyro can report every rate 4× too high** while merely looking
+  "unstable." `enableDefault()` selects ±245 dps, not the ±1000 dps that the
+  commonly-copied `0.035` dps/LSB constant assumes.
 
-Neither announced itself as a configuration error. The structural response —
+Neither announces itself as a configuration error. The structural response —
 **read configuration back from the hardware and print it at boot** — is cheap,
-and is now the standing expectation for any new device on this bus.
+and is the standing expectation for any new device on this bus.
 
 ## Safety
 
