@@ -64,9 +64,27 @@ with a **source selector**:
   flight numbers.
 - **Hold still** — flat output, for checking noise and drift behaviour.
 
-The flight profile deliberately hits 6 g, which would clip a ±2 g
-accelerometer. That's intentional — it's a real limitation and the viewer
-should show it rather than hide it.
+The flight profile deliberately hits 6 g, which clips a ±2 g accelerometer.
+The producer now models that honestly: the `ax/ay/az` fields are **clipped to
+±2 g**, the range the LSM6 is actually configured for, while the `hg` field
+carries the true unclipped magnitude. On the flight profile the two disagree
+exactly as the real hardware would — which is the entire argument for fitting
+an ADXL375, and it means the high-g readout can be developed and checked
+without waiting for a launch.
+
+In bench and hold-still modes the synthetic GNSS also **cold-starts
+realistically**: no fix for 3 s, then a 4-satellite ±42 m fix that converges to
+9 satellites and ±2.5 m over roughly 20 s. That interval is exactly when a
+naive viewer grabs its pad datum, so without it the quality gate would never be
+exercised outside a real bring-up. Flight mode skips it — the vehicle has been
+on the pad far longer than the compressed 40 s loop represents.
+
+The synthetic GNSS **drops lock from launch until a few seconds past apogee**,
+then reacquires at a position drifted downwind. That is what a real receiver
+does, and it is the case the trajectory view has to render as an honest gap. If
+the synthetic source never dropped lock, that code path would go untested until
+a real flight — the worst possible time to discover it draws a fictional
+curve.
 
 ## Endpoints
 
@@ -97,10 +115,24 @@ who reads this repo can join your network.
 ## Wiring in the radio
 
 The wire format (§6.6) is identical to what the flight sketch already emits
-over serial (`V,ax,ay,az,gx,gy,gz,alt,vel,ms`), so the viewer needs **no
-changes**. Keep the trailing `ms` field when the radio goes in: it is the
-flight computer's own `millis()`, and it is the only thing that makes the
-arrival-time jitter of a lossy RF link harmless to the attitude estimate.
+over serial, so the viewer needs **no changes**:
+
+```
+V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc
+```
+
+Keep the `millis` field when the radio goes in: it is the flight computer's own
+clock, and it is the only thing that makes the arrival-time jitter of a lossy
+RF link harmless — to the attitude estimate, and to the trajectory view, which
+throttles its path sampling on it rather than on arrival time.
+
+`hg` and `fix` use **−1** for "part not fitted", which is deliberately distinct
+from a zero reading; `hacc` uses −1 for "no fix". Fields were appended, never
+inserted, so anything parsing only the first eight or nine still works.
+
+`hacc` is the receiver's own horizontal accuracy estimate in metres. It is what
+lets the viewer refuse a pad datum from a bad fix — a 3D fix on five satellites
+will happily sit hundreds of metres off, and the fix type never says so.
 
 The architecture is already producer/consumer: one task produces frames, any
 number of browsers consume them.
@@ -120,16 +152,25 @@ async def radio_reader():
                 line, buf = buf.split(b"\n", 1)
                 line = line.strip()
                 if line.startswith(b"V,"):
-                    tel.latest = line.decode()   # consumers pick this up
+                    tel.set_line(line.decode())  # records freshness too
         await asyncio.sleep(0.005)
 ```
 
 Then swap `asyncio.create_task(sampler())` for
 `asyncio.create_task(radio_reader())` in `main()`.
 
-Worth adding at the same time: a staleness check, so the viewer can tell
-"radio silent" apart from "rocket sitting still." Both look like unchanging
-numbers otherwise.
+**The staleness path is already in place** — use `tel.set_line()` rather than
+assigning `tel.latest`, and it works automatically. When the source stops
+producing for more than `SOURCE_STALE_MS` (1 s), `/stream` stops sending data
+frames and sends SSE comment lines instead; the connection stays open, and the
+viewer's own 1.5 s timeout dims the readouts and counts the age of the last
+frame. `/health` also reports `stale` and `source_age_ms`.
+
+This matters more once the radio is real than it does now. Repeating the last
+frame forever — which is what the stream did before — makes "radio silent" and
+"rocket sitting still" produce byte-identical output, and no viewer-side timer
+can tell them apart, because frames keep arriving on time. The fix has to be
+here, at the source, not only in the browser.
 
 ## Verified on hardware
 

@@ -1,7 +1,7 @@
 # Avionics Status Report
 
 **Water pressure rocket avionics — build status**
-v0.1 · September 2026
+v0.2 · September 2026
 
 Where the build has actually got to, subsystem by subsystem. The design is
 specified in [`avionics_documentation.md`](avionics_documentation.md); this
@@ -11,17 +11,17 @@ document does not repeat it, it says how much of it exists.
 
 ## 1. Build status at a glance
 
-**Two sensors are on the flight computer, and the ground segment runs on
-synthetic data.** Everything else is specified, not built.
+**All four I²C sensors are now on the flight computer, and the ground segment
+runs on synthetic data.** Everything else is specified, not built.
 
 | Item | State |
 |---|---|
 | MS5611 barometer | **Wired to the flight Pico, reading** |
 | MinIMU-9 v6 board | **Wired.** LSM6DSO accel/gyro reading; LIS3MDL magnetometer not read by the current sketch |
-| Bench diagnostics | **Working on hardware** |
+| ADXL375 high-g | **Wired and reading.** Zero-g offset untrimmed — 0.73 g at rest (§4.4) |
+| SAM-M8Q GPS | **Wired, configured, 3D fix obtained.** Indoor sky view only; accuracy not yet usable |
+| Bench diagnostics | **Working on hardware** for all four sensors |
 | Pico W ground station + viewer | **Working** — synthetic telemetry only |
-| ADXL375 high-g | Not connected |
-| SAM-M8Q GPS | Not connected |
 | RFM95W LoRa ×2 | Not connected — no radio link exists |
 | MG90D servo, latch, deployment | Not connected, not built |
 | Reed switch arming interlock | Not connected |
@@ -38,9 +38,14 @@ community core. That choice has consequences the design document treats in
 §10.1 — no `setup1()`/`loop1()`, no bundled LittleFS, a reduced RAM budget, and
 a zero-length-`endTransmission()` defect that affects every I²C probe.
 
+![Diagnostics boot output showing the I²C scan, decoded sensor configuration
+registers, GPS dynamic model confirmation, gyro bias and ground pressure
+zeroing](docs/images/diagnostics-boot.png)
+
 **What runs today:** [`rocket_diagnostics/`](rocket_diagnostics/), a
-bench sketch driving the MS5611 and LSM6DSO. It reports interpreted values —
-°C, hPa, metres AGL, m/s, g, degrees tilt — plus:
+bench sketch driving the MS5611, LSM6DSO, ADXL375 and SAM-M8Q. It reports
+interpreted values — °C, hPa, metres AGL, m/s, g, degrees tilt, and now
+high-g magnitude and GPS fix state — plus:
 
 - I²C scan and per-device pass/fail at boot, using the dummy-byte probe the
   Mbed core requires
@@ -54,11 +59,36 @@ bench sketch driving the MS5611 and LSM6DSO. It reports interpreted values —
   reading is *unknown* rather than merely large
 - CSV mode for the Serial Plotter (`c`), and telemetry stream mode (`v`)
   feeding the attitude viewer
+- **High-g column and peak tracker** from the ADXL375, with its own 13-bit
+  saturation ceiling — the LSM6's `int16` threshold would never fire on it
+- **GPS status** (`g`, and in the 5-second summary): fix type, satellite count,
+  coordinates, MSL altitude, and *never acquired* distinguished from *acquired
+  and lost*
+- **Config readback extended to both new parts** — the ADXL375 data rate
+  decoded from `BW_RATE`, the GPS dynamic model and nav rate read back from the
+  module. Same rule that already covers the IMU
+- **Graceful degradation:** a missing high-g reads `---` and a missing GPS reads
+  `not fitted`. Only the barometer and IMU halt the sketch, because every other
+  displayed number derives from them
 
 Bench ranges are ±2 g and ±1000 dps at 208 Hz. The ±2 g is deliberate: it is
 the right choice for confirming a clean 1.00 g at rest, and it is the first
-thing to saturate, so range problems surface early rather than in the air.
-Flight ranges (±16 g, ±2000 dps) are an open item.
+thing to saturate, so range problems surface early rather than in the air. With
+the ADXL375 now fitted, the ±2 g ceiling is also less costly — the high-g part
+covers everything above it. Flight ranges (±16 g, ±2000 dps) remain an open
+item.
+
+**Confirmed on hardware, with two qualifications.** All four sensors answer on
+the bus and every configurable one reports its settings back at boot. The
+ADXL375's zero-g offset is untrimmed, so its absolute magnitude near 1 g is not
+usable (peaks and events, its actual job, are unaffected). The GPS holds a 3D
+fix with coordinates confirmed against a map, but has only been given an indoor
+sky view — on 5 satellites it wandered 238 m, which is why the viewer now
+refuses to take a pad datum from a fix like that.
+
+**Cost of the two new sensors** (`arduino:mbed_rp2040:pico`): flash
+112,536 → **148,883 bytes** (5% → 7%), globals 43,996 → **44,608 bytes**
+(16% either way). Almost all of the +35.7 KB is the u-blox library.
 
 **What does not exist:** the flight firmware itself. The state machine,
 threading model and flight record are specified (§5.4, §10.2, §10.3); nothing
@@ -83,6 +113,22 @@ a port.
 A serial-only build is kept as `rocket_attitude_viewer_serial.html`. It is the
 bench path that works today — with no radio, driving the viewer straight off the
 flight computer over USB is the only route carrying real sensor data.
+
+**The viewer now shows high-g and GPS**, carried as five appended fields on
+the §6.6 wire format (`hg,fix,sats,lat,lon`), plus a **Trajectory** tab that
+draws the flown path in 3D. Only altitude is measured on that path; horizontal
+comes from the GPS, which is blind through the flight, so unlocked segments are
+drawn as an explicit dashed gap with the horizontal frozen rather than
+interpolated. Board commands (`z b r g`) are available as buttons over Web
+Serial — not over Wi-Fi, because SSE is one-way and there is no back-channel.
+
+**Staleness is now displayed.** Previously a frozen readout at full contrast was
+indistinguishable from a vehicle sitting perfectly still. A gap of more than
+1.5 s (≈37 missed frames at 25 Hz) now turns the status dot amber, counts the
+age of the last frame, and dims the readouts. It runs independently of each
+transport's own error handling, because neither catches the case that matters:
+an SSE connection stays open while the ground station has nothing to forward,
+and a quiet serial port raises nothing. Applied to all three viewer builds.
 
 **Ground station** — Pico W in MicroPython, own Wi-Fi AP, streaming telemetry
 over SSE at 25 Hz. Verified on hardware: three simultaneous clients each
@@ -153,7 +199,10 @@ locally and is not relied upon.
 
 **Sensors and radio**
 
-- [ ] ADXL375 bring-up and diagnostic integration
+- [ ] **Sign off the ADXL375 on the bench** — address in the scan, boot line
+      decoding 800 Hz, ≈1.0 g at rest, a tap spiking past the LSM6's ceiling
+- [ ] **Sign off the GPS outdoors** — boot line reading `airborne <1g  OK`,
+      then a 3D fix with plausible coordinates within 30–60 s
 - [ ] Paired LoRa TX/RX test with RSSI + packet-loss logging
 - [ ] Wire the radio into the ground station — replace the synthetic producer
       task with a UART packet reader. The architecture already supports it; no
@@ -163,9 +212,8 @@ locally and is not relied upon.
 
 **Ground segment**
 
-- [ ] Add a telemetry staleness timeout. "Radio silent" and "vehicle sitting
-      perfectly still" currently look identical on the display — a
-      safety-relevant display defect, not a nicety
+- [x] ~~Add a telemetry staleness timeout~~ — done; 1.5 s gap dims the readouts
+      and counts the age of the last frame, in all three viewer builds
 - [ ] Set the operational AP password on the ground station hardware; the value
       in this repository is a placeholder default
 

@@ -5,22 +5,33 @@ pressure rocket. The vehicle is a testbed; **the avionics are the deliverable.**
 
 Mapúa University (Intramuros).
 
+![The attitude viewer running live off the flight computer over USB: 3D vehicle
+model with tilt protractor, numeric readouts for attitude, accelerometer,
+barometer, high-g and GPS, and strip charts for altitude, acceleration and
+tilt](docs/images/viewer-attitude.png)
+
+*The viewer on real hardware. Tilt 7.94°, 1.01 g at rest, high-g peak 2.51 g,
+26 Hz on the board's own clock across 7868 frames with zero bad lines. The GPS
+block reads `no fix` and `no datum` — indoors on a bench that is the correct
+answer, and the pad datum is deliberately withheld rather than taken from a bad
+fix (§4.5).*
+
 ---
 
-## Status: v0.1 — work in progress
+## Status: v0.2 — work in progress
 
-Early. **Two sensors are on the flight computer** and the ground segment works
-on synthetic data. Everything else in this repository is **design intent, not
-built hardware.**
+Early. **All four I²C sensors are on the flight computer and confirmed
+working** and the ground segment works on synthetic data. Everything else in this repository is **design
+intent, not built hardware.**
 
 | Item | State |
 |---|---|
 | MS5611 barometer | Wired to the flight Pico, reading |
 | MinIMU-9 v6 board | Wired; LSM6DSO (accel/gyro) reading. LIS3MDL magnetometer not read by the current sketch |
-| Bench diagnostics (`rocket_diagnostics/`) | Working on hardware |
+| ADXL375 high-g | **Wired and reading** — zero-g offset untrimmed |
+| SAM-M8Q GPS | **Wired, configured, 3D fix obtained** — indoor sky view only, accuracy not yet usable |
+| Bench diagnostics (`rocket_diagnostics/`) | Working on hardware, all four sensors |
 | Pico W ground station + viewer | Working — **synthetic telemetry only** |
-| ADXL375 high-g | Not connected |
-| SAM-M8Q GPS | Not connected |
 | RFM95W LoRa ×2 | Not connected — no radio link exists |
 | MG90D servo, latch, deployment | Not connected, not built |
 | Reed switch arming interlock | Not connected |
@@ -65,13 +76,23 @@ documents disagree, that one wins.
 | [`avionics_status_report.md`](avionics_status_report.md) | Project status summary |
 | `water_rocket_avionics_bom.xlsx` | Bill of materials — costs, suppliers, phasing, per-part justification |
 | [`rocket_diagnostics/`](rocket_diagnostics/) | Bench diagnostics sketch (verified working on hardware) |
-| `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Web Serial over USB, or SSE over Wi-Fi |
+| `rocket_attitude_viewer.html` | **Live 3D viewer.** Attitude and trajectory tabs; Web Serial over USB, or SSE over Wi-Fi |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer — the bench path that works today |
+| [`tools/checks/`](tools/checks/) | Headless checks for the ground station model and viewer builds — no hardware needed |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in each version |
 | [`pico_w_ground_station/`](pico_w_ground_station/) | Ground station firmware (MicroPython) + the viewer as deployed |
 | `rocket_assembly_viewer.jsx` | Interactive 3D assembly and separation-sequence visualiser |
 
 ## Hardware
+
+![Breadboard bench stack: a Raspberry Pi Pico H with the SparkFun SAM-M8Q GPS,
+Adafruit ADXL375 high-g accelerometer, Pololu MinIMU-9 v6 and GY-63 MS5611
+barometer, all wired to one I²C bus with jumper
+wires](docs/images/bench-stack-1.jpg)
+
+*The bench stack as built: Pico H, SAM-M8Q, ADXL375, MinIMU-9 v6 and GY-63,
+sharing a single I²C bus. This is the breadboard prototype — the two-deck FR4
+sled specified in §11 of the design document is not built.*
 
 | Subsystem | Component |
 |---|---|
@@ -88,8 +109,9 @@ documents disagree, that one wins.
 
 ~80 g, ~80–90 mA, roughly 5 hours of pad endurance.
 
-> This is the **designed** stack. Only the MS5611 and the MinIMU-9 are
-> currently connected — see [Status](#status-v01--work-in-progress).
+> This is the **designed** stack. The four I²C sensors — MS5611, MinIMU-9,
+> ADXL375 and SAM-M8Q — are connected; the radio, deployment hardware and
+> airframe are not. See [Status](#status-v01--work-in-progress).
 
 ## What the limitations actually are
 
@@ -110,10 +132,10 @@ still be true once everything is wired:
 
 §14 of the design document keeps the full list.
 
-## Two silent failure modes on this platform
+## Five silent failure modes on this platform
 
-Both look like something other than what they are, which is what makes them
-worth knowing before you meet them:
+Each looks like something other than what it is, which is what makes them worth
+knowing before you meet them:
 
 - The **MS5611 can report itself absent while working perfectly.** A
   zero-length I²C `endTransmission()` on Mbed cores issues a read-type
@@ -121,8 +143,21 @@ worth knowing before you meet them:
 - The **gyro can report every rate 4× too high** while merely looking
   "unstable." `enableDefault()` selects ±245 dps, not the ±1000 dps that the
   commonly-copied `0.035` dps/LSB constant assumes.
+- The **GPS can hold a perfect fix on the ground and drop it at launch.** The
+  default dynamic model assumes a ground vehicle and rejects a rocket
+  trajectory as implausible. A `setDynamicModel()` that silently failed is
+  indistinguishable from one that worked until you are airborne.
+- The **high-g accelerometer clips 8× earlier than its data type suggests.**
+  The ADXL375 is 13-bit sign-extended into `int16`, so it saturates near
+  ±4095 counts, not ±32767. Saturation logic written against the integer width
+  never fires at all.
+- A **`3D` GPS fix says nothing about accuracy.** Measured here: a stationary
+  board on a 3D fix with 5 satellites sat **238 m** from where it first locked,
+  reading `3D` the whole time. Carry the receiver's own `hAcc` estimate, and
+  never take a position datum from the first fix — it is the worst one of the
+  session.
 
-Neither announces itself as a configuration error. The structural response —
+None of these announces itself as a configuration error. The structural response —
 **read configuration back from the hardware and print it at boot** — is cheap,
 and is the standing expectation for any new device on this bus.
 

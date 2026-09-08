@@ -53,6 +53,48 @@ PORT      = 80
 RATE_HZ   = 25                   # telemetry frames per second
 FRAME_DT  = 1.0 / RATE_HZ
 
+# How long the source may go quiet before this station stops forwarding frames.
+# Deliberately tighter than the viewer's own 1.5 s staleness timeout, so the
+# viewer's timer starts promptly rather than both waiting on each other.
+SOURCE_STALE_MS = 1000
+
+# --- flight profile timing, shared by the motion model and the GNSS model ----
+# These were local to _flight(). They are module-level now because _gps() has
+# to know the same phase boundaries -- two copies of "when is apogee" would
+# drift apart the first time anyone tuned the profile.
+FL_LOOP      = 40.0             # s, whole loop
+FL_T_PAD     = 5.0              # s on the pad before launch
+FL_BURN_T    = 1.6              # s of burn
+FL_BURN_ACC  = 5.0              # g, net of gravity
+FL_G         = 9.81
+FL_V_BURNOUT = FL_BURN_ACC * FL_G * FL_BURN_T
+FL_T_COAST   = FL_V_BURNOUT / FL_G
+FL_T_APOGEE  = FL_T_PAD + FL_BURN_T + FL_T_COAST
+# Lock returns a few seconds past apogee, once the vehicle is under chute and
+# gentle enough for the receiver to reacquire.
+FL_T_REACQ   = FL_T_APOGEE + 6.0
+
+# The LSM6 is configured to +/-2 g on the bench, so that is what it can report.
+# Anything above it is the ADXL375's job -- which is the entire reason the
+# high-g part is fitted, and worth making visible in the synthetic source too.
+LSM6_RANGE_G = 2.0
+
+# Synthetic pad position (Mapua Intramuros). Only the offsets matter to the
+# trajectory view; the absolute point just has to be plausible.
+PAD_LAT = 14.5906
+PAD_LON = 120.9878
+M_PER_DEG_LAT = 111320.0
+
+# Cold-start convergence. A receiver does not go from nothing to a good fix --
+# it holds a 3D fix with four or five satellites and tens of metres of error
+# for a while first. That interval is exactly when a naive viewer grabs its pad
+# datum, so the synthetic source has to reproduce it or the quality gate that
+# now guards the datum would never be exercised outside a real bring-up.
+ACQ_DEAD_S   = 3.0      # s before any fix at all
+ACQ_TAU_S    = 6.0      # s, accuracy improvement time constant
+ACQ_HACC_0   = 40.0     # m of horizontal error just after first fix
+ACQ_HACC_INF = 2.5      # m, settled open-sky accuracy
+
 led = Pin("LED", Pin.OUT)
 
 # ----------------------------------------------------------------------------
@@ -70,7 +112,13 @@ class Telemetry:
         self.t = 0.0
         self.boot = time.ticks_ms()
         self.frames = 0
-        self.latest = "V,0.0000,0.0000,1.0000,0.00,0.00,0.00,0.000,0.000,0"
+        self.latest = ("V,0.0000,0.0000,1.0000,0.00,0.00,0.00,0.000,0.000,0"
+                       ",1.00,0,0,0.0000000,0.0000000,-1.00")
+        # When the SOURCE last produced a frame -- not when one was last sent
+        # to a browser. The difference is the whole point: a silent radio and a
+        # motionless rocket both leave `latest` unchanged, and only this
+        # timestamp tells them apart.
+        self.updated = time.ticks_ms()
 
 
     def set_mode(self, m):
@@ -114,10 +162,10 @@ class Telemetry:
         exceeds a +/-2 g accelerometer — that clipping is real and the
         viewer should show it rather than hide it.
         """
-        BURN_T   = 1.6          # s
-        BURN_ACC = 5.0          # g, net of gravity
-        T_PAD    = 5.0
-        g        = 9.81
+        BURN_T   = FL_BURN_T
+        BURN_ACC = FL_BURN_ACC
+        T_PAD    = FL_T_PAD
+        g        = FL_G
 
         v_burnout = BURN_ACC * g * BURN_T
         a_burnout = 0.5 * BURN_ACC * g * BURN_T * BURN_T
@@ -125,7 +173,7 @@ class Telemetry:
         apogee    = a_burnout + v_burnout * t_coast - 0.5 * g * t_coast * t_coast
         t_apogee  = T_PAD + BURN_T + t_coast
 
-        t = self.t % 40.0
+        t = self.t % FL_LOOP
         if t < T_PAD:                                  # on the pad
             alt, vel, thrust, spin = 0.0, 0.0, 0.0, 0.0
         elif t < T_PAD + BURN_T:                       # boost
@@ -169,6 +217,76 @@ class Telemetry:
     def _still(self, dt):
         return 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0
 
+    def _acq(self):
+        """Satellites and horizontal accuracy as the receiver settles.
+
+        Keyed on total elapsed time, not the flight loop's phase: a real
+        receiver converges once and stays converged, it does not cold-start
+        again every 40 s.
+        """
+        age = self.t
+        if age < ACQ_DEAD_S:
+            return 2, -1.0
+        sats = min(9, 4 + int((age - ACQ_DEAD_S) / 4.0))
+        hacc = ACQ_HACC_INF + ACQ_HACC_0 * math.exp(-(age - ACQ_DEAD_S) / ACQ_TAU_S)
+        return sats, hacc
+
+    def _gps(self):
+        """Synthetic GNSS -> (fix, sats, lat, lon, hacc).
+
+        The flight profile deliberately DROPS LOCK from launch until a few
+        seconds past apogee, then reacquires at a drifted position. That is
+        what a real receiver does -- it is not a flight-phase sensor, it loses
+        lock at launch and takes 5-15 s to come back -- and it is the case the
+        trajectory view has to render as an honest gap rather than interpolate
+        a smooth arc across. If the synthetic source never dropped lock, that
+        code path would never be exercised until a real flight, which is the
+        worst possible time to discover it draws a fictional curve.
+        """
+        lat_scale = M_PER_DEG_LAT
+        lon_scale = M_PER_DEG_LAT * math.cos(PAD_LAT * math.pi / 180.0)
+
+        # A metre or two of the wander any stationary receiver shows, so the
+        # trajectory view has something non-degenerate to draw on the bench.
+        j = ((self.frames * 22695477 + 1) >> 16) & 0xFFFF
+        w = (j / 32768.0) - 1.0
+
+        def pad_fix():
+            if self.mode == "flight":
+                # Already converged: the vehicle has been sitting on the pad
+                # for far longer than this compressed 40 s loop represents, so
+                # starting it mid-acquisition would misrepresent launch day.
+                sats, hacc = 9, 2.5
+            else:
+                sats, hacc = self._acq()
+            if hacc < 0:
+                return (0, sats, 0.0, 0.0, -1.0)
+            # Wander scales with the accuracy the receiver is claiming, so an
+            # early marginal fix moves around by tens of metres and a settled
+            # one by a metre or two -- which is what the real part does.
+            return (3, sats,
+                    PAD_LAT + (w * hacc * 0.6) / lat_scale,
+                    PAD_LON + (w * hacc * 0.5) / lon_scale,
+                    hacc)
+
+        if self.mode != "flight":
+            return pad_fix()
+
+        t = self.t % FL_LOOP
+        if t < FL_T_PAD:
+            return pad_fix()
+        if t < FL_T_REACQ:
+            # No lock. Report no position at all rather than the last one --
+            # a stale position repeated is indistinguishable from a live one.
+            return (0, 2, 0.0, 0.0, -1.0)
+
+        # Reacquired under the chute, drifting downwind at ~3 m/s since launch.
+        drift = 3.0 * (t - FL_T_PAD)
+        return (3, 7,
+                PAD_LAT + (drift * 0.60) / lat_scale,
+                PAD_LON + (drift * 0.80) / lon_scale,
+                4.5)
+
     # --- frame -----------------------------------------------------------
     def step(self, dt):
         """Advance the simulation by dt and cache the resulting wire line.
@@ -200,9 +318,36 @@ class Telemetry:
 
         self.frames += 1
         ms = time.ticks_diff(time.ticks_ms(), self.boot)
-        self.latest = "V,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.3f,%.3f,%d" % (
-            ax, ay, az, gx, gy, gz, alt, vel, ms)
+
+        # The high-g field carries the TRUE magnitude; the LSM6 fields are
+        # clipped to the range that part is actually configured for. The
+        # profile peaks at 6 g, so on the flight profile the two now disagree
+        # exactly as the real hardware would -- which is the whole argument for
+        # fitting an ADXL375, and it means the high-g readout can be developed
+        # and tested without waiting for a launch.
+        hg = math.sqrt(ax * ax + ay * ay + az * az)
+        ax = max(-LSM6_RANGE_G, min(LSM6_RANGE_G, ax))
+        ay = max(-LSM6_RANGE_G, min(LSM6_RANGE_G, ay))
+        az = max(-LSM6_RANGE_G, min(LSM6_RANGE_G, az))
+
+        fix, sats, lat, lon, hacc = self._gps()
+        self.set_line(
+            "V,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.3f,%.3f,%d,%.2f,%d,%d,%.7f,%.7f,%.2f" % (
+                ax, ay, az, gx, gy, gz, alt, vel, ms, hg, fix, sats, lat, lon, hacc))
         return self.latest
+
+    def set_line(self, line):
+        """The only way a new frame enters. Every source -- the synthetic
+        model today, the radio packet reader later -- goes through here, so
+        the freshness timestamp cannot be forgotten by a new producer."""
+        self.latest = line
+        self.updated = time.ticks_ms()
+
+    def stale(self):
+        """True when the source has stopped producing. Consumers use this to
+        stop forwarding, rather than repeating the last frame forever and
+        making a dead link look like a live one."""
+        return time.ticks_diff(time.ticks_ms(), self.updated) > SOURCE_STALE_MS
 
     def frame(self):
         """Most recent wire line. Consumers call this; they never advance."""
@@ -347,7 +492,17 @@ async def serve_stream(w):
     await w.drain()
     try:
         while True:
-            w.write(("data: %s\n\n" % tel.frame()).encode())
+            if tel.stale():
+                # Source has gone quiet. Send an SSE comment instead of a data
+                # frame: EventSource ignores comment lines, so the connection
+                # and its retry timer stay alive while the viewer's own
+                # staleness timeout fires. Repeating the last frame here would
+                # defeat that timeout entirely -- frames would keep arriving,
+                # they would just all say the same thing, which is precisely
+                # how "radio silent" ends up looking like "sitting still".
+                w.write(b": stale\n\n")
+            else:
+                w.write(("data: %s\n\n" % tel.frame()).encode())
             await w.drain()
             await asyncio.sleep(FRAME_DT)
     except (OSError, AttributeError):
@@ -370,6 +525,8 @@ async def serve_health(w):
         "mem_free": free,
         "uptime_s": time.ticks_diff(time.ticks_ms(), tel.boot) // 1000,
         "source": "synthetic",
+        "stale": tel.stale(),
+        "source_age_ms": time.ticks_diff(time.ticks_ms(), tel.updated),
     })
     await send_headers(w, "200 OK", "application/json")
     w.write(body.encode())

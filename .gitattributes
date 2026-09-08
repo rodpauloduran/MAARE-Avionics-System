@@ -10,4 +10,15 @@
 *.jsx  text eol=lf
 
 # Binary — never touch, never diff as text
+# `* text=auto` above applies EOL heuristics to anything not listed here, so
+# every binary format the repo carries needs an entry or it can be corrupted
+# on checkout.
 *.xlsx binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.svg  text eol=lf
+*.pdf  binary
+*.mp4  binary

@@ -1,15 +1,21 @@
 # Water Rocket Avionics System — Design Documentation
 
-**v0.1 · September 2026**
+**v0.2 · September 2026**
 Mapúa University (Intramuros)
 
-> **What is built.** The barometer and IMU are on the flight computer and the
-> bench diagnostics sketch works (§13.2). The ground segment — a 3D attitude
-> viewer (§6.7) and a Pico W ground station serving it over its own Wi-Fi
-> (§6.5) — works on synthetic telemetry. Nothing else is connected: no high-g
-> accelerometer, GPS, radio link, deployment hardware or airframe. This
-> document specifies the whole system; treat anything outside §13.2 and §6.5
-> as design intent rather than description.
+> **What is built.** All four I²C sensors are now on the flight computer — the
+> barometer, the IMU, the ADXL375 high-g accelerometer and the SAM-M8Q GPS —
+> and the bench diagnostics sketch drives all of them (§13.2). **All four are
+> now confirmed on hardware** — every device answers on the bus and every
+> configurable one reports its settings back correctly at boot. Two
+> qualifications: the ADXL375's zero-g offset is untrimmed (§4.4), and the GPS
+> has been given only an indoor sky view, so it holds a fix but not an accurate
+> one (§4.5). The ground segment — a 3D attitude viewer
+> (§6.7) and a Pico W ground station serving it over its own Wi-Fi (§6.5) —
+> works on synthetic telemetry. Not connected: radio link, deployment
+> hardware, arming interlock, buzzer, airframe. This document specifies the
+> whole system; treat anything outside §13.2 and §6.5 as design intent rather
+> than description.
 
 ---
 
@@ -180,6 +186,14 @@ All four devices share a single I²C bus at 400 kHz.
 | ADXL375 | `0x53` | `0x1D` if address jumper bridged |
 | SAM-M8Q | `0x42` | u-blox DDC mode |
 
+![The four sensor breakouts and the Pico on breadboards, seen from the
+opposite side, with the SAM-M8Q's chip antenna facing
+up](docs/images/bench-stack-2.jpg)
+
+*All four devices on one bus, as bench-built. Note this is a breadboard with
+jumper wires, not the two-deck sled of §11: long unshielded leads and four sets
+of pull-ups in parallel are exactly the conditions the warning below is about.*
+
 No conflicts. **Pull-up warning:** every breakout carries its own pull-ups.
 Four in parallel can over-drive the bus at 400 kHz. If the bus misbehaves,
 remove pull-ups from all but one board — start with the GY-63, whose clones
@@ -327,6 +341,50 @@ despite a nearly identical register map. The "10,000 g shock survival" figure
 on ADXL345 listings is a *survival* rating, not a measurement range — the two
 are routinely conflated.
 
+**Driver note 1 — `begin()` is safe here, unlike the MS5611's.** This is worth
+stating explicitly because §4.2 establishes the opposite habit. Adafruit_BusIO's
+address detection carries an explicit `#ifdef ARDUINO_ARCH_MBED` that writes the
+dummy byte before `endTransmission()`, so the Mbed zero-length-probe defect
+(§10.1) does not bite this part. That is a property of *this library*, not of
+the bus — check it per device rather than assuming either way.
+
+**Driver note 2 — the saturation ceiling is 13-bit, not 16-bit.** `begin()` puts
+the part in FULL_RES mode, so readings are 13-bit two's complement
+sign-extended into `int16`. Full scale is about **±4095 counts**, not ±32767.
+Saturation logic copied from the LSM6 — which genuinely does run to the integer
+width — never fires at all on this part, and a clipped boost trace would be
+reported as a valid measurement. The diagnostics sketch keeps a separate
+`HG_SAT_COUNT` for exactly this reason.
+
+**Driver note 3 — there is no range register to read back.** §4.3 makes reading
+configuration back from the hardware the standing rule, and this part is the
+exception that clarifies it: ±200 g is fixed in silicon and the library's
+`setRange()`/`getRange()` are deliberate no-ops. The scale factor is a property
+of the part number, so the readback rule applies instead to the thing that *is*
+configurable — the output data rate, decoded from `BW_RATE` and printed at boot.
+
+**Bench expectation — do not expect 1.00 g at rest.** Two effects, and the
+second is much the larger:
+
+- At rest the part sees 1 g across roughly **20 counts** (1 g ÷ 49 mg/LSB), so
+  ±0.05 g of wobble is quantisation, not noise.
+- **Its zero-g offset is specified in whole g, not milli-g.** This is a ±200 g
+  part and the offset scales with the range. Measured on this bench: **0.73 g
+  at rest while the LSM6 read 1.01 g.** That gap is the part behaving to
+  specification, not a fault — and a ±0.15 g tolerance, sized against
+  quantisation alone, flagged a healthy sensor as broken.
+
+So the rest check is deliberately loose: it flags only readings outside roughly
+**0.35–2.0 g**, which is where the faults that matter live — a dead axis reads
+≈0, and an ADXL345 in this footprint reads about 12× low (≈0.08 g). Anything
+inside that band is reported as offset, with the delta against the LSM6 shown.
+
+**Trimming the offset out is an open item.** It needs a per-axis calibration
+against a known orientation; a magnitude check cannot separate offset from
+scale error, and the offset is per-axis while |a| is not. Until then, treat the
+high-g channel as trustworthy for *peaks and events* — which is its actual job,
+launch detect and burnout — and not for absolute magnitude near 1 g.
+
 ### 4.5 SAM-M8Q — GPS
 
 Landing coordinates. Explicitly **not** a flight-phase sensor: it loses lock at
@@ -343,6 +401,52 @@ gnss.saveConfiguration();
 
 The default dynamic model assumes a ground vehicle and will reject a rocket
 trajectory as implausible, dropping lock exactly when needed.
+
+**Read the dynamic model back.** A `setDynamicModel()` that silently failed
+looks identical to one that worked — right up until the vehicle is airborne and
+the receiver drops lock. `getDynamicModel()` returns the configured value (255
+if the query itself failed), so the same readback discipline §4.3 applies to the
+IMU applies here, and the decoded model is printed at boot.
+
+**`setAutoPVT(true)` is not optional in a timed loop.** Without it `getPVT()`
+polls the module and **blocks for up to 1100 ms** — 27 missed samples at the
+diagnostics sketch's 25 Hz, and catastrophic in a 500 Hz flight loop. With it,
+the module pushes solutions on its own schedule and `getPVT()` returns
+immediately, so it is safe to call from a rate-gated loop. This is the same
+class of trap as the MS5611's blocking `read()` (§4.2), and it is easy to miss
+because the default *works* — it is only slow.
+
+**Cold start is 30–60 s and needs sky view.** "No fix" on an indoor bench is the
+expected result, not a fault, and the diagnostics sketch says so at boot rather
+than leaving someone to debug a working receiver. The sketch also distinguishes
+*never acquired* from *acquired and lost*, because those point at different
+problems — sky view versus antenna or power.
+
+**A 3D fix is not an accurate fix, and nothing in the fix type says so.**
+Observed on the bench: a stationary board holding a **3D fix on 5 satellites**
+sat **238 m** from where it first locked. The fix type read `3D` for the whole
+session. Four satellites is the theoretical minimum for a 3D solution, so five
+is barely above the floor, and with that few — all in whatever patch of sky a
+window exposes — the error ellipsoid is long and thin. The wander runs along
+its major axis, which is why poor fixes drift in a *line* rather than a blob.
+
+**So carry `hAcc`.** The receiver publishes its own horizontal accuracy
+estimate in the NAV-PVT message it is already sending, so reading it costs
+nothing:
+
+```cpp
+int32_t hAccMm = gnss.getHorizontalAccEst();   // millimetres
+```
+
+Without it a position cannot be argued with. With it, "238 m from the pad" can
+be read next to "±42 m claimed" and the display can *act* on the difference —
+see the pad-datum gate in §6.7.
+
+**Never take the pad datum from the first fix.** The first fix of a session is
+the worst one you will ever get: cold start, fewest satellites, worst geometry.
+Anything measured from it inherits that error silently, and every later, better
+fix appears to *move* — which is precisely the 238 m above. Gate the datum on
+satellites and `hAcc`, or set it deliberately once the fix has settled.
 
 Multi-GNSS including **QZSS**, which has good coverage over the Philippines —
 a meaningful advantage over GPS-only receivers at this latitude. Integrated
@@ -671,12 +775,34 @@ One line format is shared by the serial path and the Wi-Fi path, so the viewer
 has a single parser regardless of how frames arrive:
 
 ```
-V,ax,ay,az,gx,gy,gz,alt,vel[,millis]
+V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc
 ```
 
 Accelerations in g, rates in dps, altitude in metres AGL, velocity in m/s. The
-tenth field is the **flight computer's own `millis()`** and is optional for
-backward compatibility.
+tenth field is the **flight computer's own `millis()`**; fields 11–15 carry the
+high-g accelerometer and the GPS.
+
+| Field | Meaning |
+|---|---|
+| `hg` | High-g magnitude in g, or **−1** if the ADXL375 is not fitted |
+| `fix` | u-blox fix type 0–5, or **−1** if the GPS is not fitted |
+| `sats` | Satellites used in the solution |
+| `lat`, `lon` | Decimal degrees, `0` when there is no fix |
+| `hacc` | The receiver's **own** horizontal accuracy estimate in metres, or **−1** with no fix or no GPS |
+
+`hacc` earns its place because a position with no accuracy beside it cannot be
+argued with — see §4.5, where a 3D fix on five satellites wandered 238 m and
+nothing else in the output disagreed.
+
+**Fields are appended, never inserted.** A parser reading only the first eight
+or nine fields is unaffected, which is what makes this a compatible extension
+rather than a new format. The viewer treats a short line as "this firmware
+predates the field", distinct from a `−1` meaning "the part is not fitted".
+
+**−1 rather than 0 marks absence** because 0 is a legal value for every one of
+them: 0.00 g is a real high-g reading in freefall, fix type 0 is a real "no
+fix", and 0,0 is a real position in the Gulf of Guinea. A sentinel that
+collides with valid data is not a sentinel.
 
 **That timestamp matters more than it looks.** Without it the receiver derives
 `dt` from packet *arrival* time, and USB and radio both deliver in bursts —
@@ -717,6 +843,85 @@ in §6.5 is wired in and the SSE path carries live telemetry.
 single-sample spikes an average would smear rather than reject) quiet the
 readouts by roughly 2.6× on tilt, 3.1× on |a| and 4.7× on altitude, at a cost
 of 0.32 s and 1.12 s respectively to reach 90% of a step.
+
+![The attitude view: 3D rocket model with a tilt protractor and reference
+axis, a column of numeric readouts, and three strip
+charts](docs/images/viewer-attitude.png)
+
+*The attitude view driven live over USB. The GPS block shows the pad-datum gate
+holding: with no fix, `FROM PAD` reads `no datum` rather than a fabricated
+distance. The raw telemetry line along the bottom is the §6.6 format, with
+`hg = 0.73` and the trailing `0,0,0,0,-1` marking no fix and no accuracy
+estimate.*
+
+**Two stage views, one canvas.** The stage switches between **Attitude** —
+the 3D model, tilt protractor and reference axis — and **Trajectory**, which
+draws the flown path in 3D over a metric ground grid, with a drag-to-orbit
+camera that auto-frames the data.
+
+> **Only one axis of the trajectory is measured, and the drawing says so.**
+> Altitude is barometric: driftless, ~10 cm noise, honest. Horizontal position
+> is GPS — and the GPS is blind for the whole flight (§4.5), losing lock at
+> launch and taking 5–15 s to reacquire on a ~10 s flight.
+>
+> The IMU cannot fill that gap. §5.2 already rejects integrating it for
+> *velocity*; position is that same error integrated **twice**, which is tens
+> of metres over a 3 s coast with no way to know you are wrong. So an unlocked
+> segment is drawn **dashed and red with the horizontal frozen at the last
+> fix**, never interpolated. A smooth arc through the gap would be an
+> invention, and the one thing this view must be is trustworthy about where
+> the vehicle actually was.
+
+**The pad datum is gated, not taken from the first fix.** §4.5 explains why:
+the first fix is the worst one of the session, and everything measured from it
+inherits that error invisibly. The viewer accepts a datum only from a fix the
+receiver itself vouches for — **≥ 6 satellites and `hAcc` ≤ 10 m** — and until
+then reports `no pad datum` rather than a fabricated distance from a bad
+origin. A **Set pad** button re-datums on the next fix that clears the same
+bar, which is the launch-day workflow: zero the barometer and set the pad in
+the same moment, once the receiver has settled.
+
+**Fixes worse than the bar are drawn, but visibly weaker.** A faded blue
+segment is a position the receiver does not stand behind. Dropping it would
+hide that the vehicle was somewhere; drawing it at full strength would
+overstate how well we know where. The legend names the threshold.
+
+Where it earns its keep before any flight: the §13.3 **GPS dynamic model** test
+("drive with logging active → plausible track") exercises it immediately, and
+after landing it gives pad-to-landing displacement for the walk to the vehicle.
+A true flight path is a **post-flight reconstruction in Python** from the logged
+raw data, per §2.5 — not a live view.
+
+**Path sampling is throttled on the board's clock, not on arrival time.** Both
+transports deliver in bursts, so throttling on arrival collapses whole bursts
+into a single point and samples the path unevenly. The `millis()` field of §6.6
+exists to make arrival jitter harmless, and the trajectory recorder uses it for
+exactly that reason.
+
+**Board command buttons.** `Zero baro`, `Gyro bias`, `Reset peaks` and
+`GPS status` send the sketch's single-character commands over the same port the
+telemetry arrives on. They are **serial-only, and this is a transport
+limitation, not an oversight**: SSE is one-way, so a page served by the ground
+station has no back-channel to the flight computer at all. The buttons are
+hidden in network mode. `c` (CSV) and `h` (reprint header) are deliberately not
+exposed — both would corrupt the stream the page is reading.
+
+Zeroing the barometer and re-measuring gyro bias block the sketch for a second
+or more while they average, so frames genuinely stop. The staleness indicator
+below is suppressed for the duration: the flag would be *correct*, but crying
+outage about a pause the operator asked for trains people to ignore it.
+
+**Telemetry staleness is shown, not inferred.** Once frames stop arriving, a
+frozen readout at full contrast is indistinguishable from a vehicle sitting
+perfectly still — a safety-relevant display defect rather than a cosmetic one.
+The viewer flags a gap of more than **1.5 s** (≈37 missed frames at 25 Hz): the
+status dot turns amber, the status line counts the age of the last frame, and
+the numeric readouts dim. This is deliberately independent of each transport's
+own error handling, because neither one catches the case that matters most: an
+SSE connection stays happily open while the ground station has nothing to
+forward, and an open serial port that has gone quiet raises nothing. The strip
+charts need no equivalent treatment — they only advance on ingest, so a gap
+stays a visible gap and is never back-filled.
 
 **Peak trackers deliberately run on raw data**, because smoothing a peak
 understates the maximum, which defeats its purpose. A smoothing on/off toggle
@@ -1073,12 +1278,18 @@ beacon at 1 packet / 5 s is comfortably compliant.
 Non-negotiable sequence. Each step isolates one class of failure. **If an
 address does not appear, stop and fix it — do not proceed hoping.**
 
-1. Pico alone — blink GP25
-2. I²C scanner with nothing attached — confirms the bus works
-3. Add **MS5611** → expect `0x77`. Breathe on it; pressure should move
-4. Add **MinIMU-9** → expect `0x6B` and `0x1E`. Tilt it
-5. Add **ADXL375** → expect `0x53`. Tap it
-6. Add **GPS** → expect `0x42`. Take it outside, wait for fix
+1. Pico alone — blink GP25 ✔
+2. I²C scanner with nothing attached — confirms the bus works ✔
+3. Add **MS5611** → expect `0x77`. Breathe on it; pressure should move ✔
+4. Add **MinIMU-9** → expect `0x6B` and `0x1E`. Tilt it ✔
+5. Add **ADXL375** → expect `0x53`. Tap it ✔ — address in the scan, boot
+   decodes `BW_RATE = 0xD` → 800 Hz, taps register (2.51 g peak observed).
+   Note the rest reading is offset-dominated, not 1.00 g (§4.4)
+6. Add **GPS** → expect `0x42`. Take it outside, wait for fix ✔ — address in
+   the scan, boot reports `airborne <1g  OK` at 5 Hz, and a 3D fix has been
+   obtained with coordinates confirmed against a map. **Accuracy is not yet
+   adequate**: 5 satellites through a window gave a fix that wandered 238 m
+   (§4.5). Needs open sky before any figure from it is usable
 7. **LoRa** on SPI — test link with the second Pico before integrating
 8. **Servo** on its own supply, with the 220 µF cap. Sweep it
 9. **Reed switch** — confirm LOW with magnet present
@@ -1104,8 +1315,51 @@ values — °C, hPa, metres AGL, m/s, g, degrees tilt — plus:
 - CSV mode for the Arduino Serial Plotter (`c`)
 - **Telemetry stream mode (`v`)** emitting the §6.6 wire format for the
   attitude viewer, timestamped with the board's own `millis()`
+- **High-g column and peak tracker** from the ADXL375, with its own 13-bit
+  saturation ceiling and its own rest check sized against quantisation rather
+  than noise (§4.4)
+- **GPS status** — fix type, satellite count, coordinates and MSL altitude,
+  polled at 1 Hz and printed in the summary block or on demand with `g`.
+  Distinguishes *never acquired* from *acquired and lost*
+- **Config readback extended to the two new parts**: the ADXL375 data rate
+  decoded from `BW_RATE`, and the GPS dynamic model and navigation rate read
+  back from the module (§4.4, §4.5)
+- **Missing sensors degrade rather than halt.** The high-g column reads `---`
+  and the GPS line reads `not fitted` if either part does not answer; only the
+  barometer and IMU are fatal, because every other number on the display is
+  derived from them
 
-**Status: verified working.**
+![Serial monitor output at boot: I²C scan listing six addresses, LSM6 control
+registers decoded to ±2 g and ±1000 dps, ADXL375 data rate decoded to 800 Hz,
+GPS dynamic model confirmed as airborne <1g at 5 Hz, gyro bias offsets, and
+ground pressure zeroed at 1004.22 hPa](docs/images/diagnostics-boot.png)
+
+*Boot output on hardware. Every configuration value on screen was **read back
+from the chip**, not echoed from the code that set it — `CTRL1_XL = 0x50`,
+`CTRL2_G = 0x58`, `BW_RATE = 0xD`, and the GPS reporting `airborne <1g  OK`.
+That is the §4.3 rule doing its job for all three configurable devices at once.*
+
+> **One anomaly in that scan: `0x7E  (unknown)`.** Nothing in this design lives
+> there, and 0x78–0x7F is the I²C reserved range, so a device ACKing there is
+> not a device. The likely cause is a marginal bus — four sets of pull-ups in
+> parallel on breadboard jumper leads (§4.1) — producing a phantom ACK. Worth
+> resolving before it is blamed on something else: the standing rule is that an
+> address which does not appear must be fixed, and the inverse deserves the same
+> attention.
+
+**Status: all four sensors confirmed on hardware.** The boot output above is
+from the assembled stack: every device answers on the bus, and every
+configuration value shown was read back from the chip rather than echoed from
+the code that set it. Two qualifications carry forward — the ADXL375's rest
+reading is offset-dominated and its trim is an open item (§4.4), and the GPS
+has a fix but not yet a *usable* one, having been tested only indoors (§4.5).
+
+**Flash and RAM cost of the two new sensors** (`arduino:mbed_rp2040:pico`):
+program storage 112,536 → **148,883 bytes** (5% → 7% of 2 MB) and globals
+43,996 → **44,608 bytes** (both 16% of 264 KB). Nearly all of the +35.7 KB is
+the u-blox library; the RAM cost is negligible. Neither figure threatens the
+112 KB flight buffer of §10.3, but the flight firmware should be re-measured
+against it rather than assumed.
 
 **Timing constants are tied to the sample rate.** The sketch runs at 25 Hz, and
 three constants must be sized against it or they quietly measure the wrong
@@ -1186,6 +1440,19 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 - [x] Barometer and IMU on the flight computer; bench diagnostics running
       interpreted output, noise statistics and saturation flags (§13.2)
+- [x] ADXL375 and SAM-M8Q on the same I²C bus, driven by the diagnostics
+      sketch with per-part saturation ceilings and config readback, and
+      **confirmed on hardware** — §13.1 steps 5 and 6 (§4.4, §4.5)
+- [x] Telemetry staleness timeout, end to end — the viewer dims and counts a
+      gap over 1.5 s, and the ground station stops forwarding frames after 1 s
+      of source silence rather than repeating the last one (§6.5, §6.7)
+- [x] High-g and GPS carried in the telemetry wire format as appended fields,
+      with readouts in the viewer (§6.6)
+- [x] Trajectory view — flown path in 3D, altitude measured and horizontal
+      from GPS, with unlocked segments drawn as an explicit gap (§6.7)
+- [x] Board command buttons in the viewer over Web Serial (§6.7)
+- [x] `hAcc` carried in telemetry, with the pad datum gated on satellite count
+      and accuracy rather than taken from the first fix (§4.5, §6.7)
 - [x] Attitude viewer, with dual serial/Wi-Fi transport (§6.7)
 - [x] Pico W ground station, serving the viewer over its own Wi-Fi (§6.5)
 - [x] Telemetry wire format, shared across both transports (§6.6)
@@ -1194,14 +1461,21 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 **Open items:**
 
-- [ ] ADXL375 bring-up and diagnostic integration
+- [ ] **Trim the ADXL375 zero-g offset** — per-axis, against a known
+      orientation. It reads 0.73 g at rest against the LSM6's 1.01 g, which is
+      within specification for a ±200 g part but leaves the channel unusable
+      for absolute magnitude near 1 g (§4.4)
+- [ ] **Take the GPS somewhere with open sky.** It holds a 3D fix and the
+      coordinates are right, but on 5 satellites indoors the position wandered
+      238 m. Expect 10–15 satellites and single-digit metres outdoors (§4.5)
+- [ ] **Resolve the phantom `0x7E` in the I²C scan** — nothing lives there and
+      0x78–0x7F is reserved, so it points at a marginal bus rather than a
+      device. Four sets of pull-ups in parallel on breadboard leads is the
+      prime suspect (§4.1)
 - [ ] Paired LoRa TX/RX test sketches with RSSI + packet-loss logging
 - [ ] **Wire the radio into the ground station** — replace the synthetic
       producer task with a UART packet reader. Architecture already supports
       it; no viewer changes needed (§6.5)
-- [ ] **Add a telemetry staleness timeout.** "Radio silent" and "vehicle
-      sitting perfectly still" currently look identical on the display. This is
-      a safety-relevant display defect, not a nicety
 - [ ] Build flight antenna (82 mm); source SMA edge-mount connector + 868 MHz
       whip for ground station
 - [ ] Extend LSM6DSO to flight ranges (±16 g, ±2000 dps) via register writes,
@@ -1230,6 +1504,7 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 | `water_rocket_avionics_bom.xlsx` | Full bill of materials, costs, suppliers, phasing, per-part justification |
 | `airframe_build_spec.md` | Airframe structure, materials, dimensions, assembly sequence |
 | `hardware_reference.md` | Quick bench reference — pin map, addresses, per-sensor driver notes, bring-up order. Kept in sync with this document; **this document is the authority** where the two disagree |
+| `tools/checks/` | Headless checks for the ground station telemetry model and all three viewer builds. No hardware; `python tools/checks/run_checks.py` |
 | `rocket_diagnostics/` | Bench diagnostics sketch (verified working on hardware) |
 | `rocket_flight/` | Flight firmware skeleton — state machine, threading, telemetry. **Not written** (§14) |
 | `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Self-contained; Web Serial over USB or SSE over Wi-Fi (§6.7) |
@@ -1247,7 +1522,7 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 ---
 
-*v0.1 — September 2026. This document reflects design intent and analysis,
+*v0.2 — September 2026. This document reflects design intent and analysis,
 much of it first-order rather than validated. Numbers marked as estimates
 should be confirmed by test or FEA before they are relied upon for flight
 safety.*
@@ -1257,10 +1532,19 @@ the tilt inhibit is unimplemented, and no part of the telemetry chain has
 carried a real sensor reading over the air. Treat the §5.5 filter figures as
 evidence the algorithm is correct, not as evidence it survives a 50 g boost.*
 
-*Two failure modes on this platform are worth holding onto as a class, because
-both are silent. The MS5611 can report itself absent while working perfectly
-(§4.2), and the gyro can report every rate 4× high while looking merely
-"unstable" (§4.3). Neither announces itself as a configuration error. The
-structural response — read configuration back from the hardware and print it at
-boot — is cheap, and is the standing expectation for any new device on this
-bus.*
+*Five failure modes on this platform are worth holding onto as a class, because
+every one of them is silent. The MS5611 can report itself absent while working
+perfectly (§4.2). The gyro can report every rate 4× high while looking merely
+"unstable" (§4.3). The GPS can hold a flawless fix on the ground and drop it at
+launch, because a `setDynamicModel()` that failed is indistinguishable from one
+that worked until you are airborne (§4.5). And the ADXL375 saturates at 13-bit
+while sitting in an `int16`, so saturation logic sized to the integer width
+never fires and a clipped boost trace is reported as a measurement (§4.4). And
+a GPS holding a confident `3D` fix on five satellites can sit 238 m from where
+it started without moving, because fix type says nothing about accuracy
+(§4.5).*
+
+*None of them announces itself as a configuration error. The structural response
+— read configuration back from the hardware and print it at boot, and size every
+limit against the part rather than against its data type — is cheap, and is the
+standing expectation for any new device on this bus.*

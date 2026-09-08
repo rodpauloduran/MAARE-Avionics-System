@@ -48,8 +48,18 @@ for a nichrome MOSFET, a second deployment channel, or an OLED.
 | ADXL375 (Adafruit) | **0x53** | 0x1D if the address jumper is bridged. |
 | SAM-M8Q GPS | **0x42** | u-blox DDC (I2C) mode. |
 
+![Bench stack on breadboards: Pico H, SAM-M8Q GPS, ADXL375, MinIMU-9 v6 and
+GY-63 barometer wired to one I²C bus](docs/images/bench-stack-1.jpg)
+
+*The stack these addresses refer to. Breadboard and jumper wires — the FR4 sled
+of §11 is not built.*
+
 No conflicts. Run an I2C scanner after adding each device and confirm the
 address appears *before* writing any driver code.
+
+A real scan from this stack, with all five devices answering, is in §13.2 of the
+design document. It also shows a phantom `0x7E` in the reserved range, which is
+a bus-quality symptom rather than a device — see that section.
 
 **Scan correctly on this core (§10.1).** A zero-length `endTransmission()`
 issues a *read*-type transaction on Mbed cores, which most devices will not
@@ -67,10 +77,18 @@ for (byte a = 1; a < 127; a++) {
 Side effect: this writes a zero byte to every address on the bus. Harmless for
 everything currently fitted, but re-check if a new part joins.
 
-**Pull-up warning:** each breakout carries its own pull-up resistors. Four in
-parallel can drag the bus too strongly at 400 kHz. If the bus misbehaves,
-remove the pull-ups from all but one board (Pololu's are 10 k, Adafruit's are
-10 k, GY-63 clones are often 4.7 k or 2.2 k — remove the GY-63's first).
+**Pull-up warning:** each breakout carries its own pull-up resistors, and all
+four boards are now fitted, so this has gone from a caution to a live
+consideration. Four sets in parallel can drag the bus too strongly at 400 kHz.
+If the bus misbehaves — dropped devices in the scan, intermittent NACKs, reads
+that fail only under vibration — remove the pull-ups from all but one board
+(Pololu's are 10 k, Adafruit's are 10 k, GY-63 clones are often 4.7 k or 2.2 k
+— remove the GY-63's first).
+
+**Scan side effect, re-checked for the full set.** The dummy byte above writes
+`0x00` to every address. For the MS5611 that is a harmless ADC-read command; on
+the ADXL375 register 0 is the read-only device ID; on the u-blox it only moves
+the DDC address pointer. All four are safe. Re-check if a fifth board joins.
 
 ---
 
@@ -197,6 +215,38 @@ Set the data rate to 800 Hz or higher (`accel.setDataRate(ADXL343_DATARATE_800_H
 
 Log **raw counts**, not floats. Convert offline.
 
+**`begin()` is safe on this core — unlike the MS5611's.** Worth stating because
+the MS5611 note above teaches the opposite reflex. Adafruit_BusIO's address
+detection has an explicit `#ifdef ARDUINO_ARCH_MBED` that writes the dummy byte
+before `endTransmission()`, so the Mbed probe defect does not bite this part.
+That is a property of the library, not the bus — check per device.
+
+**Saturation is at 13 bits, not 16.** `begin()` puts the part in FULL_RES, so
+readings are 13-bit two's complement sign-extended into `int16`: full scale is
+about **±4095 counts**, not ±32767. Copying the LSM6's `32000` threshold here
+means clipping is *never* detected and a clipped boost trace is reported as a
+measurement. Use a separate constant:
+
+```cpp
+const int16_t SAT_COUNT    = 32000;   // LSM6, int16 full scale
+const int16_t HG_SAT_COUNT = 4000;    // ADXL375, 13-bit full scale (~196 g)
+```
+
+**There is no range register to read back.** ±200 g is fixed in silicon and the
+library's `setRange()`/`getRange()` are deliberate no-ops, so the "read it back"
+rule applies to the one thing that *is* configurable — the data rate. Decode it
+from `BW_RATE` (low nibble) and print it at boot:
+
+```cpp
+uint8_t bw = accel.readRegister(ADXL3XX_REG_BW_RATE) & 0x0F;
+int hz = (bw >= 8) ? (25 << (bw - 8)) : 0;   // exact: 3.125 Hz * 2^(code-5)
+```
+
+**At rest it has ~20 counts of signal** (1 g ÷ 49 mg/LSB), so a ±0.05 g wobble
+is quantisation, not noise. Don't chase it. A rest check on this part is really
+looking for a dead axis or the wrong chip in the footprint — an ADXL345 reads
+about 12× low here and nothing else would flag it.
+
 ### SAM-M8Q
 
 Configure once at boot, then poll:
@@ -213,9 +263,49 @@ gnss.saveConfiguration();
 car and will reject your trajectory as implausible, dropping lock. Airborne <1g
 tells the receiver to expect vertical motion.
 
-Poll with `gnss.getPVT()` — non-blocking, returns false if no new data. Do
-this from the normal-priority `loop()`, never from the realtime sensor thread
-(§10.2).
+**Read it back.** A `setDynamicModel()` that silently failed is indistinguishable
+from one that worked until you are airborne — the worst possible time to find
+out. Same discipline as the IMU:
+
+```cpp
+uint8_t dm = gnss.getDynamicModel();          // 255 = the query itself failed
+if (dm != DYN_MODEL_AIRBORNE1g) Serial.println(F("NOT airborne <1g"));
+```
+
+**`getPVT()` is only non-blocking if you call `setAutoPVT(true)` first.** This
+is the trap. Without it, `getPVT()` polls the module and **blocks for up to
+1100 ms** — 27 missed samples at 25 Hz, and fatal in a 500 Hz flight loop. With
+it, the module pushes solutions on its own schedule and the call returns
+immediately. The default *works*; it is just slow, which is exactly why it gets
+missed.
+
+```cpp
+gnss.setAutoPVT(true);        // <- do this, or getPVT() blocks
+```
+
+Even so, poll it from the normal-priority `loop()`, never from the realtime
+sensor thread (§10.2). 1 Hz is plenty — nothing it reports changes faster than
+walking pace.
+
+**Cold start is 30–60 s and needs sky view.** "No fix" on an indoor bench is
+expected, not a fault. Worth distinguishing *never acquired* from *acquired and
+lost* in your output: the first points at sky view, the second at antenna or
+power.
+
+**Read `hAcc`, and do not trust a fix just because it says 3D.** Measured on
+this bench: a stationary board on a **3D fix with 5 satellites** sat **238 m**
+from where it first locked, with the fix type reading `3D` throughout. Four
+satellites is the minimum for a 3D solution, so five has almost no geometric
+margin, and the error ellipse goes long and thin — poor fixes drift in a line,
+not a blob. The accuracy estimate is already in the NAV-PVT message:
+
+```cpp
+int32_t hAccMm = gnss.getHorizontalAccEst();   // mm; print it next to the fix
+```
+
+**And never datum anything on the first fix** — it is the worst one you will
+get. Gate on satellites and hAcc (this project uses ≥ 6 sats and ≤ 10 m) or set
+the origin deliberately once the receiver has settled.
 
 ### RFM95W
 
@@ -323,12 +413,16 @@ Declare it as a global static array. Do **not** malloc.
 
 Do not skip steps. Each one isolates a class of failure.
 
-1. Pico alone — blink GP25.
-2. I2C scanner — nothing connected. Confirms the bus works.
-3. Add **MS5611** only. Scanner shows 0x77. Read pressure, breathe on it, watch it change.
-4. Add **MinIMU-9**. Scanner shows 0x6B and 0x1E. Tilt it, watch accel/gyro.
-5. Add **ADXL375**. Scanner shows 0x53. Tap it, watch it spike.
-6. Add **GPS**. Scanner shows 0x42. Take it outside, wait for fix.
+1. Pico alone — blink GP25. **done**
+2. I2C scanner — nothing connected. Confirms the bus works. **done**
+3. Add **MS5611** only. Scanner shows 0x77. Read pressure, breathe on it, watch it change. **done**
+4. Add **MinIMU-9**. Scanner shows 0x6B and 0x1E. Tilt it, watch accel/gyro. **done**
+5. Add **ADXL375**. Scanner shows 0x53. Tap it, watch it spike. **wired, not signed off** —
+   check the boot line decodes 800 Hz, `hg` reads ≈1.0 g at rest, a firm tap
+   goes well past the LSM6's ±2 g ceiling.
+6. Add **GPS**. Scanner shows 0x42. Take it outside, wait for fix. **wired, not
+   signed off** — check the boot line says `airborne <1g  OK`, then `g` reports
+   a 3D fix with plausible coordinates within 30–60 s outdoors.
 7. **LoRa** on SPI — separate bus, test link with a second Pico before integrating.
 8. **Servo** on its own supply. Sweep it. Add the 220 uF cap.
 9. **Reed switch** — confirm the pin reads LOW with the magnet present.
