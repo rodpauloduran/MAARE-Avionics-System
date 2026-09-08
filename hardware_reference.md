@@ -3,7 +3,7 @@
 Target: Raspberry Pi Pico (RP2040), **official Arduino Mbed OS RP2040 core**
 (not the Earle Philhower community core).
 
-> **Authority.** `AVIONICS_DOCUMENTATION.md` (Revision B) is the design
+> **Authority.** `avionics_documentation.md` (Revision B) is the design
 > authority. This file is the quick bench reference - pin numbers, addresses,
 > driver gotchas, bring-up order. Where the two disagree, the design document
 > wins. Sections below cite it as §n.

@@ -1223,18 +1223,18 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 | Document | Contents |
 |---|---|
-| `water_rocket_avionics_BOM.xlsx` | Full bill of materials, costs, suppliers, phasing, per-part justification |
+| `water_rocket_avionics_bom.xlsx` | Full bill of materials, costs, suppliers, phasing, per-part justification |
 | `airframe_build_spec.md` | Airframe structure, materials, dimensions, assembly sequence |
-| `HARDWARE_REFERENCE.md` | Quick bench reference — pin map, addresses, per-sensor driver notes, bring-up order. Kept in sync with this document; **this document is the authority** where the two disagree |
+| `hardware_reference.md` | Quick bench reference — pin map, addresses, per-sensor driver notes, bring-up order. Kept in sync with this document; **this document is the authority** where the two disagree |
 | `rocket_diagnostics.ino` | Bench diagnostics sketch, **rev B** (verified working) |
-| `rocket_flight.ino` | Flight firmware skeleton — state machine, threading, telemetry. **Not yet in the repository** (§14) |
+| `rocket_flight.ino` | Flight firmware skeleton — state machine, threading, telemetry. **Not written** (§14) |
 | `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Self-contained; Web Serial over USB or SSE over Wi-Fi (§6.7) |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer. The bench path that works *today*, driving the viewer straight off the flight computer over USB while the flight-to-ground radio does not yet exist (§6.7) |
 | `pico_w_ground_station/main.py` | **Ground station firmware.** MicroPython: Wi-Fi AP, web server, SSE telemetry (§6.5) |
 | `pico_w_ground_station/index.html` | Viewer as deployed to the ground station |
 | `pico_w_ground_station/README.md` | Ground station setup, endpoints, radio integration notes |
 | `rocket_assembly_viewer.jsx` | Interactive 3D assembly and separation-sequence visualiser |
-| `avionics_status_report.txt` | Project status summary |
+| `avionics_status_report.md` | Project status summary |
 
 **External references:**
 

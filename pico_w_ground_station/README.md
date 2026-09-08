@@ -8,7 +8,7 @@ no internet, no app install.
 exists to prove out the viewing and UI half of the system. There's one
 function to replace when the radio arrives (see below).
 
-Design reasoning lives in [`AVIONICS_DOCUMENTATION.md`](../AVIONICS_DOCUMENTATION.md)
+Design reasoning lives in [`avionics_documentation.md`](../avionics_documentation.md)
 §6.5 (ground station) and §6.7 (viewer). That document is the authority if the
 two ever disagree.
 

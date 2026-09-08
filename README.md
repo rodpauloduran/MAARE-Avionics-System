@@ -7,6 +7,33 @@ Mapúa University (Intramuros) — rocketry group, pre-organisation phase.
 
 ---
 
+## Status: v0.1 — work in progress
+
+Early. **Two sensors are on the flight computer** and the ground segment works
+on synthetic data. Everything else in this repository is **design intent, not
+built hardware.**
+
+| Item | State |
+|---|---|
+| MS5611 barometer | Wired to the flight Pico, reading |
+| MinIMU-9 v6 board | Wired; LSM6DSO (accel/gyro) reading. LIS3MDL magnetometer not read by the current sketch |
+| Bench diagnostics (`rocket_diagnostics.ino`) | Working on hardware |
+| Pico W ground station + viewer | Working — **synthetic telemetry only** |
+| ADXL375 high-g | Not connected |
+| SAM-M8Q GPS | Not connected |
+| RFM95W LoRa ×2 | Not connected — no radio link exists |
+| MG90D servo, latch, deployment | Not connected, not built |
+| Reed switch arming interlock | Not connected |
+| LS3040 buzzer | Not connected |
+| Airframe | Not built |
+| `rocket_flight.ino` | **Not written** |
+
+The design document is deliberately ahead of the hardware — that is its job.
+Read it as a specification, not a description. `avionics_status_report.md`
+tracks progress against it, and `CHANGELOG.md` records what changed when.
+
+---
+
 ## What this is
 
 A water rocket's flight envelope is hostile in the ways that matter — 20–100 g
@@ -23,7 +50,7 @@ that transfers directly to high-power rocketry.
 
 ## Start here
 
-**[`AVIONICS_DOCUMENTATION.md`](AVIONICS_DOCUMENTATION.md)** — the design
+**[`avionics_documentation.md`](avionics_documentation.md)** — the design
 document (Revision B) and the authority for this project. Everything else is
 either a companion spec or an implementation of something it specifies. If two
 documents disagree, that one wins.
@@ -32,14 +59,15 @@ documents disagree, that one wins.
 
 | Path | What it is |
 |---|---|
-| [`AVIONICS_DOCUMENTATION.md`](AVIONICS_DOCUMENTATION.md) | **Design document, Revision B.** Sensors, deployment logic, radio, power, recovery, firmware, regulatory, test plan |
-| [`HARDWARE_REFERENCE.md`](HARDWARE_REFERENCE.md) | Quick bench reference — pin map, I²C addresses, driver gotchas, bring-up order |
+| [`avionics_documentation.md`](avionics_documentation.md) | **Design document, Revision B.** Sensors, deployment logic, radio, power, recovery, firmware, regulatory, test plan |
+| [`hardware_reference.md`](hardware_reference.md) | Quick bench reference — pin map, I²C addresses, driver gotchas, bring-up order |
 | [`airframe_build_spec.md`](airframe_build_spec.md) | Airframe structure, materials, dimensions, assembly sequence |
-| [`avionics_status_report.txt`](avionics_status_report.txt) | Project status summary |
-| `water_rocket_avionics_BOM.xlsx` | Bill of materials — costs, suppliers, phasing, per-part justification |
+| [`avionics_status_report.md`](avionics_status_report.md) | Project status summary |
+| `water_rocket_avionics_bom.xlsx` | Bill of materials — costs, suppliers, phasing, per-part justification |
 | `rocket_diagnostics.ino` | Bench diagnostics sketch, **rev B** (verified working) |
 | `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Web Serial over USB, or SSE over Wi-Fi |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer — the bench path that works today |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each version |
 | [`pico_w_ground_station/`](pico_w_ground_station/) | Ground station firmware (MicroPython) + the viewer as deployed |
 | `rocket_assembly_viewer.jsx` | Interactive 3D assembly and separation-sequence visualiser |
 
@@ -60,23 +88,25 @@ documents disagree, that one wins.
 
 ~80 g, ~80–90 mA, roughly 5 hours of pad endurance.
 
-## Where the project actually stands
+> This is the **designed** stack. Only the MS5611 and the MinIMU-9 are
+> currently connected — see [Status](#status-v01--work-in-progress).
 
-**Working:** bench diagnostics on hardware; the attitude viewer; the Pico W
-ground station serving it over its own Wi-Fi; the attitude filter (PI
-complementary, with online bias estimation and yaw-immune tilt).
+## What the limitations actually are
 
-**Not yet:**
+Beyond the not-yet-connected hardware above, these are the things that would
+still be true once everything is wired:
 
 - **The deployment code has never flown.** This is the principal risk and the
-  deliberate trade for SRAD capability.
-- **No radio link.** The ground station's telemetry is synthetic — nothing in
-  that path has carried a real sensor reading over the air.
-- **The tilt inhibit is specified but not implemented**, and the attitude
-  filter runs ground-side only.
+  deliberate trade for SRAD capability. Serious teams often fly a commercial
+  altimeter as primary deployment alongside SRAD logging.
+- **The tilt inhibit is specified but not implemented.** The attitude filter
+  runs ground-side only and has not been ported to flight firmware.
 - **Attitude filter numbers are from synthetic tests**, not flight data. They
   establish that the algorithm is correct, not that it survives a 50 g boost.
-- `rocket_flight.ino` is not yet written.
+- **The gyro saturates at ±2000 dps** (~333 RPM). A spinning vehicle exceeds
+  this and the attitude estimate becomes unrecoverable, not merely noisy.
+- **Yaw is unobservable** without magnetometer calibration, so the
+  roll-about-vertical readout drifts. Tilt is unaffected.
 
 §14 of the design document keeps the full list.
 
