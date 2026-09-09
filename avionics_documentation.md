@@ -1,6 +1,6 @@
 # Water Rocket Avionics System — Design Documentation
 
-**v0.2 · September 2026**
+**v0.2.1 · September 2026**
 Mapúa University (Intramuros)
 
 > **What is built.** All four I²C sensors are now on the flight computer — the
@@ -881,6 +881,27 @@ origin. A **Set pad** button re-datums on the next fix that clears the same
 bar, which is the launch-day workflow: zero the barometer and set the pad in
 the same moment, once the receiver has settled.
 
+**The gate is a toggle, and the two questions behind it are kept apart.**
+A `Fix gate` button sits beside `Smoothing`, and turning it off lets any 2D
+fix set the datum. The distinction that matters is between *is this fix any
+good?* and *may I take a datum from it?* — only the second is the operator's
+to answer. So a weak fix accepted with the gate off is still drawn faded and
+still counted as low-confidence: switching the gate off permits a datum, it
+does not make the fix accurate, and the display must not imply otherwise. The
+trajectory legend states plainly when the gate is off.
+
+Turning the gate off deliberately does **not** move an existing datum. Relaxing
+the bar lets the next fix establish one where there is none; moving a datum that
+already exists is what `Set pad` is for, and doing it silently would shift every
+distance on screen without anyone asking.
+
+**A missing `hAcc` no longer blocks the datum forever.** The gate originally
+hard-required the accuracy field, which contradicted §6.6's rule that appended
+fields are optional: any board running firmware older than that field could
+never establish a datum, and the only symptom was a **purely vertical
+trajectory** with no message explaining it. Where `hAcc` is absent the gate now
+falls back to satellite count alone.
+
 **Fixes worse than the bar are drawn, but visibly weaker.** A faded blue
 segment is a position the receiver does not stand behind. Dropping it would
 hide that the vehicle was somewhere; drawing it at full strength would
@@ -910,6 +931,30 @@ Zeroing the barometer and re-measuring gyro bias block the sketch for a second
 or more while they average, so frames genuinely stop. The staleness indicator
 below is suppressed for the duration: the flag would be *correct*, but crying
 outage about a pause the operator asked for trains people to ignore it.
+
+**A serial monitor is built into the page.** The footer shows only the most
+recent line, which is useless the moment the board says anything worth reading —
+the boot banner, the decoded configuration registers, the reply to a `g`
+command — because all of it scrolls past at 25 Hz. The alternative was
+disconnecting and opening the Arduino Serial Monitor, which means surrendering
+the port and therefore the live view, a poor trade for a one-line answer.
+
+The console is collapsed by default and expands into a scrolling log. Three
+details earn their place:
+
+- **Telemetry frames are excluded by default.** At 25 Hz they bury everything
+  else within a second, and everything else is the reason the log exists. A
+  toggle includes them when the raw stream is what you want to see.
+- **Blank lines are preserved.** The boot output uses them as structure, and a
+  monitor that eats them is harder to read than the one it replaces. Lines are
+  captured before the parser's trim-and-discard step for exactly this reason.
+- **It sticks to the bottom only if you are already there.** Yanking the view
+  down while someone is scrolled up reading is the one thing a log pane must
+  not do.
+
+It is **read-only by design**. The safe commands already have buttons, and `c`
+and `h` would corrupt the very stream the page is parsing, so there is no free
+text field from which to fire them.
 
 **Telemetry staleness is shown, not inferred.** Once frames stop arriving, a
 frozen readout at full contrast is indistinguishable from a vehicle sitting
@@ -1522,7 +1567,7 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 ---
 
-*v0.2 — September 2026. This document reflects design intent and analysis,
+*v0.2.1 — September 2026. This document reflects design intent and analysis,
 much of it first-order rather than validated. Numbers marked as estimates
 should be confirmed by test or FEA before they are relied upon for flight
 safety.*

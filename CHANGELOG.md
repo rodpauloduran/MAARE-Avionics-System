@@ -6,6 +6,54 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.2.1] — 2026-09-09
+
+### Added
+
+- **`Fix gate` toggle** beside `Smoothing`. The pad datum is normally taken
+  only from a fix that clears a quality bar (≥6 satellites, hAcc ≤10 m); this
+  turns that off so any 2D fix will do — useful on a bench, where the bar is a
+  launch-site bar the receiver rarely clears.
+  Confidence and policy are kept apart: a weak fix accepted with the gate off
+  is **still drawn faded and still counted low-confidence**. Turning the gate
+  off permits a datum; it does not make the fix accurate. It also does not move
+  an existing datum — that is what `Set pad` is for.
+- **Serial monitor in the page.** The footer only ever showed the latest line,
+  so boot output and `g` replies scrolled past at 25 Hz and the only way to
+  read them was to disconnect and open the Arduino Serial Monitor — which
+  means giving up the port, and therefore the live view. The console is
+  collapsed by default, excludes telemetry frames unless asked, preserves the
+  blank lines the boot output uses as structure, and sticks to the bottom only
+  when the reader is already there. Read-only: `c` and `h` would corrupt the
+  stream the page is parsing, so there is no free-text field to fire them from.
+
+### Fixed
+
+- **The trajectory legend overlapped the stage hint.** Both are anchored to the
+  bottom edge of the stage — the hint is absolutely positioned across its full
+  width — so the legend text and the "close the Arduino Serial Monitor first"
+  overlay drew straight through each other, and the legend got worse as it grew
+  lines. The hint is now hidden on the trajectory tab (it is about connecting
+  and streaming, not the path) and restored on the attitude tab, and the legend
+  draws its own backing panel so the ground grid cannot muddy it either. The
+  drag-to-orbit affordance is dropped on a canvas too narrow to hold it clear
+  of the legend block — on a small screen the numbers matter more than the hint.
+
+- **A missing `hAcc` blocked the pad datum forever.** The gate hard-required
+  the field, contradicting the rule that appended fields are optional (§6.6).
+  Any board on firmware older than that field could never establish a datum,
+  and the only symptom was a **purely vertical trajectory** with nothing on
+  screen explaining why. Where `hAcc` is absent the gate now falls back to
+  satellite count alone.
+
+### Test
+
+`tools/checks` gained cases for all three: the gate as a policy toggle that
+does not launder a weak fix, a legacy 14-field frame still datuming on
+satellite count, and the console's filtering, blank-line handling and cap.
+
+---
+
 ## [0.2.0] — 2026-09-09
 
 ### Added
@@ -263,6 +311,7 @@ only, and the tilt inhibit is specified but not implemented.
 
 ---
 
-[Unreleased]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rodpauloduran/MAARE-Avionics-System/releases/tag/v0.1.0

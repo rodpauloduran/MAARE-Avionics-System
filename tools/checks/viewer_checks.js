@@ -31,6 +31,11 @@ function mkEl(id) {
     _handlers: {},
     addEventListener: (t, f) => { (e._handlers[t] = e._handlers[t] || []).push(f); },
     setPointerCapture: () => {},
+    setAttribute: (k, v) => { e['attr_' + k] = v; },
+    getAttribute: (k) => e['attr_' + k],
+    removeAttribute: (k) => { delete e['attr_' + k]; },
+    scrollHeight: 0, scrollTop: 0, clientHeight: 0, hidden: false,
+    appendChild: () => {}, removeChild: () => {},
     getBoundingClientRect: () => ({ width: 800, height: 480 }),
     getContext: () => ctx2d,
     width: 800, height: 480,
@@ -42,10 +47,16 @@ function getEl(id) {
   return els.get(id);
 }
 
-const ctxCalls = { fillText: 0, stroke: 0, arc: 0, moveTo: 0, lineTo: 0 };
+const ctxCalls = { fillText: 0, stroke: 0, arc: 0, moveTo: 0, lineTo: 0, fillRect: 0, measureText: 0 };
 const ctx2d = new Proxy({}, {
   get(t, k) {
     if (k === 'canvas') return getEl('view');
+    // measureText must return a TextMetrics-shaped object, not undefined --
+    // layout code reads .width off it. Roughly 6 px per character at the
+    // ~10 px monospace the canvas labels use; only the magnitude matters.
+    if (k === 'measureText') {
+      return (s) => { ctxCalls.measureText++; return { width: String(s).length * 6 }; };
+    }
     return (...a) => { if (k in ctxCalls) ctxCalls[k]++; return undefined; };
   },
   set() { return true; },
@@ -85,7 +96,9 @@ try {
     ;return {get tel(){return tel}, get traj(){return traj},
              handleLine, drawTrajectory, drawScene, uiExtra,
              setStage, get stageMode(){return stageMode},
-             niceStep, get FIX_NAMES(){return FIX_NAMES}};`)();
+             niceStep, get FIX_NAMES(){return FIX_NAMES},
+             consoleAdd, consoleRender, consoleSetOpen,
+             get conBuf(){return conBuf}, get CON_CAP(){return CON_CAP}};`)();
 } catch (e) {
   console.log('LOAD FAILED: ' + e.message);
   process.exit(1);
@@ -144,10 +157,21 @@ api.drawScene();
 check(ctxCalls.stroke > before, 'trajectory render issued no strokes');
 console.log(`  trajectory render: ${ctxCalls.stroke - before} strokes, ${ctxCalls.fillText} labels`);
 
+/* The legend shares the stage's bottom edge with the HTML hint overlay, which
+   spans the full width. Both halves of that fix are guarded: the hint is
+   hidden on this tab, and the legend draws its own backing panel. */
+check(getEl('hint').style.display === 'none',
+      'hint overlay left visible on the trajectory tab -- it overlaps the legend');
+check(ctxCalls.fillRect > 0, 'legend drew no backing panel');
+check(ctxCalls.measureText > 0, 'legend panel was not sized to its text');
+console.log('  legend: hint hidden, backing panel drawn and measured');
+
 api.setStage('attitude');
 check(api.stageMode === 'attitude', 'setStage did not switch back');
+check(getEl('hint').style.display !== 'none',
+      'hint overlay not restored on the attitude tab');
 api.drawScene();
-console.log('  attitude render ran without throwing');
+console.log('  attitude render ran without throwing, hint restored');
 
 api.uiExtra();
 console.log(`  readouts: hg="${getEl('oHg').textContent}" fix="${getEl('oFix').textContent}" ` +
@@ -206,6 +230,67 @@ const bad0 = tel.bad;
 api.handleLine('V,0.0,junk,1.0,0,0,0,1.5,0.2,1,1,3,9,14.5,120.9');
 check(tel.bad === bad0 + 1, 'malformed frame was not counted as bad');
 console.log(`  malformed frame rejected (bad=${tel.bad})`);
+
+/* ---- the fix gate is a POLICY toggle, not a quality judgement ----------
+   Turning it off must let a weak fix set the datum, and must NOT make that
+   fix look strong: confidence is a property of the fix, not of the switch. */
+traj.reset();
+const weak = 'V,0,0,1,0,0,0,1.0,0,%T%,1.0,3,4,14.5906000,120.9878000,42.5';
+for (let i = 0; i < 20; i++) api.handleLine(weak.replace('%T%', 700000 + i * 200));
+check(traj.origin === null, 'gate ON accepted a 4-sat ±42.5 m fix as datum');
+
+traj.gateOn = false;
+for (let i = 0; i < 20; i++) api.handleLine(weak.replace('%T%', 800000 + i * 200));
+check(traj.origin !== null, 'gate OFF still refused a datum');
+const weakPts = traj.pts.filter(p => p.locked);
+check(weakPts.length > 0, 'gate OFF produced no plotted points');
+check(weakPts.every(p => p.poor),
+      'gate OFF made a weak fix render as confident -- poor flag must not follow the toggle');
+console.log(`  fix gate: ON refuses weak datum, OFF accepts it and still flags it poor`);
+traj.gateOn = true;
+
+/* ---- legacy firmware without hacc must not be pinned to a vertical path --
+   The regression: trusted() hard-required hacc, so a board predating that
+   field could never set a datum and drew a purely vertical line in silence. */
+traj.reset();
+const noHacc = 'V,0,0,1,0,0,0,1.0,0,%T%,1.0,3,9,14.5906000,120.9878000';
+for (let i = 0; i < 20; i++) api.handleLine(noHacc.replace('%T%', 900000 + i * 200));
+check(tel.hacc === null, 'legacy frame should leave hacc null, got ' + tel.hacc);
+check(traj.origin !== null,
+      'legacy frame with 9 sats was refused a datum -- appended fields must stay optional');
+const spread = traj.pts.some(p => p.locked);
+check(spread, 'legacy frame produced no horizontal position');
+console.log(`  legacy 14-field frame (no hacc, 9 sats): datum accepted on satellites alone`);
+
+/* ---- serial monitor ---------------------------------------------------- */
+const con0 = api.conBuf.length;
+api.handleLine('=== ROCKET AVIONICS BENCH DIAGNOSTICS ===');
+api.handleLine('');
+api.handleLine('  GPS: fix 3D   sats 9   14.5906000, 120.9878000   MSL 23.4 m');
+check(api.conBuf.length === con0 + 3,
+      `console captured ${api.conBuf.length - con0} of 3 lines`);
+check(api.conBuf.indexOf('') >= 0,
+      'console dropped a blank line -- boot output uses them as structure');
+check(api.conBuf[api.conBuf.length - 1].indexOf('GPS: fix 3D') >= 0,
+      'console did not capture the g-command reply');
+
+const conBeforeV = api.conBuf.length;
+for (let i = 0; i < 50; i++) api.handleLine(frames[i]);
+check(api.conBuf.length === conBeforeV,
+      'telemetry frames leaked into the console with V frames off');
+console.log(`  console: keeps blanks and board replies, excludes V frames by default`);
+
+/* buffer must be capped, or a long session eats memory */
+for (let i = 0; i < api.CON_CAP + 200; i++) api.consoleAdd('filler ' + i);
+check(api.conBuf.length <= api.CON_CAP,
+      `console buffer grew past its cap: ${api.conBuf.length} > ${api.CON_CAP}`);
+check(api.conBuf[api.conBuf.length - 1] === 'filler ' + (api.CON_CAP + 199),
+      'console dropped the newest line instead of the oldest');
+console.log(`  console: capped at ${api.CON_CAP}, drops oldest first`);
+
+api.consoleSetOpen(true);
+api.consoleRender(1e9);
+console.log('  console render ran without throwing');
 
 /* ---- clear ------------------------------------------------------------- */
 traj.reset();

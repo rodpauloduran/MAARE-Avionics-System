@@ -1,7 +1,7 @@
 # Avionics Status Report
 
 **Water pressure rocket avionics — build status**
-v0.2 · September 2026
+v0.2.1 · September 2026
 
 Where the build has actually got to, subsystem by subsystem. The design is
 specified in [`avionics_documentation.md`](avionics_documentation.md); this
