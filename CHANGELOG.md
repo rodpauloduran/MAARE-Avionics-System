@@ -52,6 +52,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 does not launder a weak fix, a legacy 14-field frame still datuming on
 satellite count, and the console's filtering, blank-line handling and cap.
 
+### Docs
+
+`docs/images/viewer-attitude.png` refreshed to show the release as built — the
+`Fix gate` toggle, the `ACCURACY` readout and the collapsed serial monitor.
+Captions in the README and §6.7 updated to match its figures, since a caption
+that misdescribes its own image is worse than none.
+
 ---
 
 ## [0.2.0] — 2026-09-09

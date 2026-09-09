@@ -7,14 +7,16 @@ Mapúa University (Intramuros).
 
 ![The attitude viewer running live off the flight computer over USB: 3D vehicle
 model with tilt protractor, numeric readouts for attitude, accelerometer,
-barometer, high-g and GPS, and strip charts for altitude, acceleration and
-tilt](docs/images/viewer-attitude.png)
+barometer, high-g and GPS, strip charts for altitude, acceleration and tilt,
+and a collapsed serial monitor along the bottom](docs/images/viewer-attitude.png)
 
-*The viewer on real hardware. Tilt 7.94°, 1.01 g at rest, high-g peak 2.51 g,
-26 Hz on the board's own clock across 7868 frames with zero bad lines. The GPS
-block reads `no fix` and `no datum` — indoors on a bench that is the correct
+*The viewer on real hardware. Tilt 0.44°, 1.01 g at rest, high-g peak 2.41 g,
+25 Hz on the board's own clock across 3873 frames with zero bad lines. The GPS
+block reads `no fix`, `no datum` — indoors on a bench that is the correct
 answer, and the pad datum is deliberately withheld rather than taken from a bad
-fix (§4.5).*
+fix (§4.5). The `Fix gate` toggle beside `Smoothing` relaxes that bar when a
+bench fix is all you have, and the serial monitor is collapsed along the
+bottom.*
 
 ---
 
