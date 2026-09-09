@@ -37,6 +37,16 @@ fed the 1000 frames the model just produced:
 - `Set pad` waits for a fix that clears the bar instead of re-datuming
   immediately, and clears the old frame's points when it does
 - fixes worse than the threshold are still plotted but flagged low-confidence
+- the **fix gate is a policy toggle, not a quality judgement**: with it off a
+  weak fix may set the datum, but must still render as low-confidence
+- a **legacy 14-field frame carrying no `hAcc`** still establishes a datum on
+  satellite count alone — appended fields are optional, and hard-requiring one
+  pinned older boards to a vertical path
+- the serial monitor keeps blank lines and board replies, excludes telemetry
+  frames by default, and caps its buffer while dropping the oldest line first
+- the trajectory legend does not collide with the stage hint: the hint is
+  hidden on that tab and restored on the attitude tab, and the legend draws a
+  backing panel sized to its own text
 - a render pass completes in both stage modes
 - a legacy 9-field frame is still accepted, and a malformed frame is rejected
   exactly once
@@ -53,11 +63,19 @@ They have already earned their keep. Between them they caught:
   path today
 - the extraction in `run_checks.py` silently dropping newly added constants,
   because it was anchored on one constant name instead of the block
+- the pad-datum gate hard-requiring `hAcc`, so a board on older firmware drew a
+  silently vertical trajectory no matter how good its fix was
 
 None of those would have shown up in a compile, and two of them would have
 looked like "the display is a bit odd" rather than a defect.
 
 ## Limits
+
+The stub has needed three extensions so far, each one surfaced by a real
+failure rather than guessed at: `setAttribute`, a `measureText` that returns a
+`TextMetrics`-shaped object rather than `undefined`, and scroll geometry for the
+console. Expect to extend it again when the viewer starts using a browser API it
+has not needed before — that is the stub doing its job, not a defect.
 
 The DOM stub is not a browser. It is enough for the script to initialise so the
 logic underneath can be exercised; it does not check layout, styling, or that

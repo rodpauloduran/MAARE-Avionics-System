@@ -118,6 +118,20 @@ button[disabled]{opacity:.4;cursor:not-allowed;box-shadow:none}
 .dot.live{background:var(--ok)}
 .dot.demo{background:var(--amber)}
 .dot.err{background:var(--red)}
+/* serial monitor */
+.console{border-top:1px solid var(--rule)}
+.conhead{display:flex;gap:6px;align-items:center;padding:6px 14px;flex-wrap:wrap}
+.ctab{
+  font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+  padding:3px 8px;border-radius:3px}
+.conmeta{font-size:10px;opacity:.55;letter-spacing:.04em}
+.congrow{flex:1}
+#conLog{
+  margin:0;padding:8px 14px 12px;max-height:230px;overflow:auto;
+  font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;
+  white-space:pre-wrap;word-break:break-word;
+  border-top:1px solid var(--rule);background:rgba(23,28,25,.035)}
+@media (max-width:560px){ #conLog{max-height:160px;font-size:10px} }
 .dot.stale{background:var(--amber)}
 /* board command group */
 .cmdgroup{display:flex;gap:6px;align-items:center}
@@ -279,6 +293,7 @@ footer{
       </select>
       <button id="btnZero">Level here</button>
       <button id="btnSmooth">Smoothing: on</button>
+      <button id="btnGate" title="The pad datum is only taken from a fix that clears a quality bar. Turn this off to accept whatever the receiver is offering.">Fix gate: on</button>
       <div class="status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></div>
     </div>
   </header>
@@ -365,6 +380,18 @@ footer{
   </div>
 
   <footer id="raw">Waiting for data&hellip;</footer>
+
+  <section class="console" id="console">
+    <div class="conhead">
+      <button id="conToggle" class="ctab" aria-expanded="false">&#9656; Serial monitor</button>
+      <span class="conmeta" id="conMeta">0 lines</span>
+      <span class="congrow"></span>
+      <button id="conV" class="ctab" title="Include the 25 Hz telemetry frames. Off by default -- they drown everything else.">V frames: off</button>
+      <button id="conCopy" class="ctab">Copy</button>
+      <button id="conClear" class="ctab">Clear</button>
+    </div>
+    <pre id="conLog" hidden></pre>
+  </section>
 </div>
 
 <script>
@@ -930,6 +957,10 @@ function ingest(parts){
 }
 
 function handleLine(line){
+  // Capture BEFORE trimming and before the empty-line guard: the board's boot
+  // output uses blank lines as structure, and a serial monitor that eats them
+  // is harder to read than the Arduino one it replaces.
+  consoleAdd(line.replace(/\r$/,''));
   line=line.trim();
   if(!line) return;
   document.getElementById('raw').textContent=line;
@@ -1279,6 +1310,7 @@ function frame(now){
   }
   ui();
   uiExtra();
+  consoleRender(now);
 }
 requestAnimationFrame(frame);
 
@@ -1413,12 +1445,35 @@ const traj={
      inside a sane bound. */
   minSats:6, maxHAcc:10, pendingPad:false,
 
+  /* The gate can be switched off from the toolbar. Two predicates rather than
+     one, because "is this fix any good?" and "may I take a datum from it?" are
+     different questions and only the second is the operator's to answer:
+
+       confident() is a judgement about the FIX and never changes with the
+                   toggle, so weak fixes still render faded even with the gate
+                   off. The operator chose to plot them; that does not make
+                   them accurate, and the display must not imply otherwise.
+       trusted()   is POLICY -- confident(), unless the operator has taken the
+                   wheel. */
+  gateOn:true,
+
   reset(){ this.pts.length=0; this.origin=null; this.lastPush=-1e12; },
   setPad(){ this.pendingPad=true; },   // re-datum on the next fix worth trusting
 
+  confident(fix,sats,hacc){
+    if(fix==null || fix<2 || sats<this.minSats) return false;
+    /* hacc null means the firmware predates the field. Appended fields were
+       meant to be optional, so fall back to satellite count rather than
+       refusing forever -- hard-requiring it here silently pinned any older
+       board to a purely vertical path, with no message saying why. */
+    if(hacc==null) return true;
+    return hacc>=0 && hacc<=this.maxHAcc;
+  },
+
   trusted(fix,sats,hacc){
-    return fix!=null && fix>=2 && sats>=this.minSats
-        && hacc!=null && hacc>=0 && hacc<=this.maxHAcc;
+    if(fix==null || fix<2) return false;
+    if(!this.gateOn) return true;
+    return this.confident(fix,sats,hacc);
   },
 
   /* `nowMs` is the BOARD's clock when the firmware sends one, not this
@@ -1451,8 +1506,10 @@ const traj={
       x=(lon-this.origin.lon)*M_PER_DEG_LAT*s;     // east, metres
       y=(lat-this.origin.lat)*M_PER_DEG_LAT;       // north, metres
       locked=true;
-      // A fix we have, but not one the receiver stands behind.
-      poor=!this.trusted(fix,sats,hacc);
+      // A fix we have, but not one the receiver stands behind. Judged by
+      // confident(), not trusted(), so switching the gate off never makes a
+      // weak fix LOOK strong -- it only permits it to set the datum.
+      poor=!this.confident(fix,sats,hacc);
     }else if(this.pts.length){
       const p=this.pts[this.pts.length-1];
       x=p.x; y=p.y;                                // frozen, and flagged unlocked
@@ -1631,14 +1688,36 @@ function drawTrajLegend(w,h,step){
   const L=['grid '+(step>=1000?(step/1000)+' km':step+' m'),
            'alt '+alt.toFixed(1)+' m  (measured)',
            traj.origin==null
-             ? 'no pad datum yet — needs '+traj.minSats+'+ sats and \u00B1'+traj.maxHAcc+' m'
+             ? (traj.gateOn
+                 ? 'no pad datum — gate wants '+traj.minSats+'+ sats and \u00B1'+traj.maxHAcc+' m'
+                 : 'no pad datum — waiting for any 2D fix')
              : (gnd==null?'ground —':'ground '+gnd.toFixed(1)+' m from pad')];
-  if(traj.pendingPad) L.push('set pad: waiting for a fix worth trusting');
+  if(!traj.gateOn) L.push('FIX GATE OFF — datum may come from an unvetted fix');
+  if(traj.pendingPad) L.push('set pad: waiting for the next usable fix');
   if(unlocked) L.push('dashed red = no GPS lock, horizontal frozen');
   if(poor) L.push('faded blue = fix worse than \u00B1'+traj.maxHAcc+' m');
-  for(let i=0;i<L.length;i++) ctx.fillText(L[i], 12, h-12-(L.length-1-i)*13);
-  ctx.textAlign='right';
-  ctx.fillText('drag to orbit', w-12, h-12);
+  /* A backing panel, because two other things share this corner: the stage's
+     HTML hint overlay is anchored to the same bottom edge, and the ground grid
+     runs underneath. Legend text sitting directly on either is unreadable, and
+     this legend is where the display says which parts of the path were
+     actually measured -- it cannot be the thing that gets lost. */
+  const LH=13, PADX=8, PADY=6;
+  let wide=0;
+  for(let i=0;i<L.length;i++) wide=Math.max(wide, ctx.measureText(L[i]).width);
+  const boxTop = h-12-(L.length-1)*LH-10;
+  ctx.fillStyle='rgba(230,232,225,.86)';
+  ctx.fillRect(4, boxTop-PADY, wide+PADX*2, L.length*LH+PADY*2-2);
+
+  ctx.fillStyle='rgba(23,28,25,.68)';
+  for(let i=0;i<L.length;i++) ctx.fillText(L[i], 4+PADX, h-12-(L.length-1-i)*LH);
+
+  // Only when it clears the legend block -- on a narrow canvas the affordance
+  // matters less than the numbers it would otherwise sit on top of.
+  if(w > wide + 150){
+    ctx.textAlign='right';
+    ctx.fillStyle='rgba(23,28,25,.45)';
+    ctx.fillText('drag to orbit', w-12, h-12);
+  }
   ctx.restore();
 }
 
@@ -1652,6 +1731,14 @@ function setStage(mode){
   if(lab) lab.innerHTML = (mode==='traj')
     ? 'Trajectory &mdash; altitude measured, horizontal from GPS'
     : 'Elevation &mdash; live';
+  /* The hint overlay is absolutely positioned along the same bottom edge the
+     trajectory legend draws on, spanning the full width -- so the two overlap
+     directly. It is also about connecting and streaming rather than about the
+     path, so it has nothing to say on this tab. Hidden here, restored on the
+     attitude tab where it belongs. */
+  const hint=document.getElementById('hint');
+  if(hint) hint.style.display = (mode==='traj') ? 'none' : '';
+
   // The dual-transport build caches canvas sizes and needs them invalidated on
   // a layout change; the serial build re-measures every frame and has no such
   // function. Guarded rather than duplicated, so the two builds stay mergeable.
@@ -1739,6 +1826,109 @@ function cmdButtonsEnabled(on){
       });
     });
   }
+})();
+
+/* ============================================================
+   Serial monitor
+
+   The footer shows the latest line, which is useless the moment the board
+   says anything worth reading: the boot banner, the decoded config
+   registers, the reply to a `g` command. All of it scrolled past at 25 Hz.
+   Having to disconnect and open the Arduino Serial Monitor to see it --
+   which also means giving up the port, and therefore the live view -- is a
+   bad trade for a one-line answer.
+
+   Read-only by design. The safe commands already have buttons; `c` and `h`
+   would corrupt the very stream this page is parsing, so there is no free
+   text input to fire them from.
+   ============================================================ */
+const CON_CAP = 800;                 // lines retained; ~50 KB of text
+let conBuf = [], conOpen = false, conShowV = false;
+let conDirty = false, conLastRender = 0;
+
+const conLog    = document.getElementById('conLog');
+const conMeta   = document.getElementById('conMeta');
+const conToggle = document.getElementById('conToggle');
+
+function consoleAdd(line){
+  // Telemetry frames are excluded by default. At 25 Hz they bury everything
+  // else within a second, and everything else is the reason this exists.
+  if(!conShowV && line.slice(0,2)==='V,') return;
+  conBuf.push(line);
+  if(conBuf.length > CON_CAP) conBuf.splice(0, conBuf.length - CON_CAP);
+  conDirty = true;
+}
+
+function consoleRender(now){
+  if(!conDirty || now - conLastRender < 100) return;   // 10 Hz is plenty
+  conLastRender = now;
+  conDirty = false;
+
+  const meta = conBuf.length + (conBuf.length===1 ? ' line' : ' lines');
+  if(conMeta && conMeta.textContent !== meta) conMeta.textContent = meta;
+  if(!conOpen || !conLog) return;
+
+  // Stick to the bottom only if the reader is already there. Yanking the view
+  // down while someone is scrolled up reading the boot output is the single
+  // most irritating thing a log pane can do.
+  const atBottom = conLog.scrollHeight - conLog.scrollTop - conLog.clientHeight < 24;
+  conLog.textContent = conBuf.join('\n');
+  if(atBottom) conLog.scrollTop = conLog.scrollHeight;
+}
+
+function consoleSetOpen(on){
+  conOpen = on;
+  if(conLog) conLog.hidden = !on;
+  if(conToggle){
+    conToggle.innerHTML = (on ? '▾' : '▸') + ' Serial monitor';
+    conToggle.setAttribute('aria-expanded', on ? 'true' : 'false');
+  }
+  conDirty = true;
+}
+
+(function(){
+  if(conToggle) conToggle.addEventListener('click', function(){
+    consoleSetOpen(!conOpen);
+  });
+
+  const bv = document.getElementById('conV');
+  if(bv) bv.addEventListener('click', function(){
+    conShowV = !conShowV;
+    this.textContent = 'V frames: ' + (conShowV ? 'on' : 'off');
+    conDirty = true;
+  });
+
+  const bc = document.getElementById('conClear');
+  if(bc) bc.addEventListener('click', function(){
+    conBuf.length = 0;
+    if(conLog) conLog.textContent = '';
+    conDirty = true;
+  });
+
+  const bcp = document.getElementById('conCopy');
+  if(bcp) bcp.addEventListener('click', function(){
+    const btn = this, text = conBuf.join('\n');
+    const done = function(ok){
+      btn.textContent = ok ? 'Copied' : 'Copy failed';
+      setTimeout(function(){ btn.textContent = 'Copy'; }, 1200);
+    };
+    // Clipboard access is not guaranteed on file:// in every browser, so the
+    // failure is reported rather than swallowed.
+    try{
+      navigator.clipboard.writeText(text).then(function(){ done(true); },
+                                              function(){ done(false); });
+    }catch(e){ done(false); }
+  });
+
+  const bg = document.getElementById('btnGate');
+  if(bg) bg.addEventListener('click', function(){
+    traj.gateOn = !traj.gateOn;
+    this.textContent = 'Fix gate: ' + (traj.gateOn ? 'on' : 'off');
+    // Deliberately does NOT move an existing datum. Relaxing the bar lets the
+    // next fix establish one if there is none; moving a datum that already
+    // exists is what `Set pad` is for, and doing it silently here would shift
+    // every distance on screen without the operator asking.
+  });
 })();
 </script>
 </body>

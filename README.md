@@ -18,7 +18,7 @@ fix (§4.5).*
 
 ---
 
-## Status: v0.2 — work in progress
+## Status: v0.2.1 — work in progress
 
 Early. **All four I²C sensors are on the flight computer and confirmed
 working** and the ground segment works on synthetic data. Everything else in this repository is **design
