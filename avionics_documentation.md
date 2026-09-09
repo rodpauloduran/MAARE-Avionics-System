@@ -845,14 +845,14 @@ readouts by roughly 2.6× on tilt, 3.1× on |a| and 4.7× on altitude, at a cost
 of 0.32 s and 1.12 s respectively to reach 90% of a step.
 
 ![The attitude view: 3D rocket model with a tilt protractor and reference
-axis, a column of numeric readouts, and three strip
-charts](docs/images/viewer-attitude.png)
+axis, a column of numeric readouts, three strip charts, and a collapsed serial
+monitor](docs/images/viewer-attitude.png)
 
 *The attitude view driven live over USB. The GPS block shows the pad-datum gate
 holding: with no fix, `FROM PAD` reads `no datum` rather than a fabricated
-distance. The raw telemetry line along the bottom is the §6.6 format, with
-`hg = 0.73` and the trailing `0,0,0,0,-1` marking no fix and no accuracy
-estimate.*
+distance, and `ACCURACY` reads `—` because there is no estimate to report. The
+raw telemetry line along the bottom is the §6.6 format, with `hg = 0.55` and a
+trailing `0,0,0,0,-1` marking no fix and no accuracy estimate.*
 
 **Two stage views, one canvas.** The stage switches between **Attitude** —
 the 3D model, tilt protractor and reference axis — and **Trajectory**, which
