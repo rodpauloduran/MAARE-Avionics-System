@@ -57,12 +57,26 @@
 //        addr jumper open = 0x53   u-blox DDC = 0x42
 //                                  antenna faces sky, nothing metallic above
 //
+//      LS3040 buzzer
+//        +      -> GP7      (design doc 9.1 specified GP13; GP7 is as built)
+//        -      -> GND
+//        A piezo at 3V3 is quiet but audible.  Drive it through an NPN or a
+//        MOSFET from a higher rail if it needs to be heard across a field.
+//
+//      MG90D servo latch
+//        signal -> GP6      (design doc 9.1 specified GP15; GP6 is as built)
+//        V+     -> its OWN supply, not the Pico's 3V3 rail
+//        GND    -> common with the Pico
+//        220 uF across the servo supply.  Servo inrush is the classic cause of
+//        unexplained resets mid-test, and a brown-out here reboots the board
+//        holding the actuator.
+//
 //  PULL-UPS: five breakouts now share this bus, each carrying its own.  In
 //  parallel they can over-drive it at 400 kHz.  If the bus misbehaves, remove
 //  pull-ups from all but one board — start with the GY-63, whose clones often
 //  use 2.2k.
 //
-//  Serial commands (115200 baud):
+//  Serial commands (115200 baud).  Single characters, dispatched on arrival:
 //    z   re-zero ground pressure to here
 //    b   re-measure gyro bias   (hold the board still)
 //    r   reset the peak trackers
@@ -71,10 +85,28 @@
 //    g   print GPS status now
 //    h   reprint the column header
 //
+//  Servo latch commands.  These need NUMBERS, which a single character cannot
+//  carry, so they are introduced with '!' and terminated by a newline.  The two
+//  schemes are kept visibly separate so a truncated line can never be mistaken
+//  for one of the single-character commands above.
+//    !arm            permit the latch to move   (nothing moves on arming)
+//    !safe           stop driving the pin
+//    !fire           withdraw the pin           (armed only; latches)
+//    !latch          re-engage the pin          (armed only; clears fired)
+//    !us <n>         drive to a raw pulse width (armed only; calibration)
+//    !pos <a> <b>    set latched / released pulse widths, microseconds
+//    !srv            print servo status
+//    !hb             heartbeat; resets the 3 s deadman while armed
+//
+//  Buzzer commands (LS3040 on GP7):
+//    !buz off|chirp|double|locate|alarm    select a pattern
+//    !beep <hz> <ms>                       one-shot tone, for checking it works
+//    !bz                                   print buzzer status
+//
 //  TELEMETRY WIRE FORMAT (command 'v').  Shared with the ground station so the
 //  viewer has one parser for both transports:
 //
-//    V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc
+//    V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus
 //
 //    ax..az   g          gx..gz  dps        alt  m AGL     vel  m/s
 //    millis   board clock, ms
@@ -84,8 +116,10 @@
 //    lat,lon  decimal degrees, 0 when there is no fix
 //    hacc     the receiver's OWN horizontal accuracy estimate, metres,
 //             or -1 with no fix / no GPS
+//    srv      servo latch: 0 safe, 1 armed, 2 armed and fired
+//    srvus    pulse width COMMANDED to the latch, microseconds; 0 = not driven
 //
-//  Fields 10-15 were appended, never inserted, so a parser that reads only the
+//  Fields 10-17 were appended, never inserted, so a parser that reads only the
 //  first eight or nine fields keeps working unchanged.  -1 rather than 0 marks
 //  "not fitted", because 0 is a legal reading for all three of hg, fix and a
 //  position on the equator.
@@ -103,6 +137,9 @@
 #include <LSM6.h>
 #include <Adafruit_ADXL375.h>
 #include <SparkFun_u-blox_GNSS_Arduino_Library.h>
+#include <Servo.h>
+#include <mbed.h>
+#include <string.h>
 
 MS5611 baro(0x77);
 LSM6   imu;
@@ -179,6 +216,10 @@ float noiseBuf[NOISE_N];
 int   noiseIdx  = 0;
 bool  noiseFull = false;
 
+char     cmdBuf[48];
+int      cmdLen    = 0;
+bool     cmdActive = false;
+
 bool     csvMode   = false;
 bool     vizMode   = false;
 bool     accClip   = false;
@@ -204,6 +245,112 @@ int32_t  gpsAltMslMm  = 0;
 int32_t  gpsHAccMm    = -1;        // receiver's own horizontal accuracy, mm
 bool     gpsEverFixed = false;
 uint32_t gpsLastFixMs = 0;
+
+// =============================================================================
+//  SERVO LATCH  (GP6)
+//
+//  THIS IS A BENCH TEST ACTUATOR, NOT THE FLIGHT DEPLOYMENT PATH.  Flight
+//  deployment belongs in the state machine on this board and must never depend
+//  on a link (design doc 2.3, 5.4).  What this exists for is finding the
+//  thresholds -- height, tilt, whatever else -- that later get compiled INTO
+//  that state machine.  The viewer drives it so the numbers can be changed
+//  without a reflash; that convenience is exactly why it must not fly.
+//
+//  DRIVEN BY THE Servo LIBRARY, which is confirmed working on hardware.
+//
+//    * The Mbed RP2040 core does NOT bundle a Servo library -- the design doc
+//      said it did; core 4.6.0 ships only MRI, PDM, SPI, Scheduler,
+//      ThreadDebug, USBHID, USBMSD and Wire.  Install Servo from the Library
+//      Manager; it declares mbed_rp2040 support and ships an mbed backend.
+//    * mbed::PwmOut was tried first and is UNTESTED, not known-broken.  It was
+//      only ever run against a servo that turned out to be faulty.  An earlier
+//      comment here declared PwmOut broken on this core; that was wrong, and is
+//      withdrawn.  A dead actuator made working code look broken -- the lesson
+//      is to swap in a known-good unit before blaming firmware.
+//
+//  Consequence worth knowing: the pulse is generated from interrupts, not by
+//  PWM hardware, so it carries some jitter and a little ISR load.  Fine for a
+//  bench latch; worth re-checking if it ever shares a core with a 500 Hz
+//  flight loop.
+//
+//  THE ONE DEVICE WHERE THE READBACK RULE CANNOT BE HONOURED.  Rule 1 of this
+//  sketch is that configuration is read back from the chip.  A hobby servo has
+//  no feedback path at all: servoNowUs below is what was COMMANDED, never what
+//  the horn did.  A stalled, stripped or unpowered servo reports exactly the
+//  same as a healthy one.  The honest fix is mechanical -- a limit or reed
+//  switch on the latch confirming the pin actually withdrew -- and it is an
+//  open item, not something firmware can paper over.
+//
+//  SAFETY, in the order it matters:
+//    * At boot the pin is NOT DRIVEN.  Period is set, pulse width stays 0, so
+//      no position is commanded until somebody arms it deliberately.
+//    * Nothing moves while disarmed.  Arming is a separate, explicit step.
+//    * A deadman disarms the latch if the host goes quiet.  On a bench an
+//      unattended armed actuator is the hazard; in flight the opposite is true,
+//      which is another reason this code is not the flight path.
+//    * Firing latches.  It will not fire twice without an explicit re-latch,
+//      mirroring the deployFired flag of 5.4.
+// =============================================================================
+const int      SERVO_PIN    = 6;
+const uint16_t SERVO_MIN_US = 600;      // hard clamp; protects the gear train
+const uint16_t SERVO_MAX_US = 2400;
+const uint32_t SERVO_DEADMAN_MS = 3000; // host silence that disarms the latch
+
+Servo latch;
+
+uint16_t servoLatchedUs  = 1000;        // pin engaged
+uint16_t servoReleasedUs = 2000;        // pin withdrawn
+uint16_t servoNowUs      = 0;           // COMMANDED, not measured.  0 = idle
+bool     servoArmed      = false;
+bool     servoFired      = false;
+uint32_t servoLastCmdMs  = 0;
+
+// A commanded move takes real time to happen.  An MG90D covers a 1000-2000 us
+// sweep in roughly 0.15-0.2 s unloaded, longer against a latch pin under
+// friction.  Detaching before that cuts the pulse train and the horn simply
+// stops -- it does not finish the move on momentum.  800 ms is margin.
+const uint32_t SERVO_SETTLE_MS = 800;
+uint32_t servoLastMoveMs = 0;
+uint32_t servoDetachAtMs = 0;           // 0 = no detach pending
+
+// =============================================================================
+//  BUZZER  (GP7, LS3040 piezo, ~4 kHz resonant)
+//
+//  NOT DRIVEN BY tone(), DELIBERATELY.  The core's tone() works, and it leaks:
+//  Tone::stop() does `pin = 0`, which nulls the DigitalOut POINTER rather than
+//  writing the pin low, so the destructor's `delete pin` frees nothing.  Every
+//  tone() call leaks one DigitalOut.  A locator beeping once a second would
+//  leak for as long as the vehicle is lost, which is precisely when you cannot
+//  afford it -- and it can leave the pin HIGH, so a piezo sits with DC across
+//  it after the beep is supposed to have stopped.
+//
+//  So this does what tone() does -- toggle a DigitalOut from a Ticker -- with
+//  the object allocated once.  Same mechanism, no leak, and the pin is driven
+//  low explicitly when silent.  (Same mechanism as the Servo library's mbed
+//  backend.  That is a pattern in the code, not a verdict on the PWM hardware:
+//  software timing simply works on any pin.)
+//
+//  Patterns are STEP TABLES advanced from the main loop, never delay().  A
+//  buzzer that blocks is a buzzer that costs you samples.
+// =============================================================================
+const int BUZZER_PIN = 7;
+const uint16_t BUZ_HZ = 4000;           // LS3040 resonant; loudest here
+
+mbed::DigitalOut *buzPin = nullptr;
+mbed::Ticker      buzTicker;
+
+// {frequency Hz, duration ms} pairs.  Frequency 0 is silence.  A duration of 0
+// terminates a one-shot; looping patterns simply run off the end and restart.
+const uint16_t BUZ_CHIRP[]  = { BUZ_HZ,  90,      0,   0 };
+const uint16_t BUZ_DOUBLE[] = { BUZ_HZ,  70,      0,  90, BUZ_HZ, 70, 0, 0 };
+const uint16_t BUZ_LOCATE[] = { BUZ_HZ, 150,      0, 850 };
+const uint16_t BUZ_ALARM[]  = { BUZ_HZ, 400,      0, 120 };
+
+const uint16_t *buzSeq   = nullptr;
+uint8_t   buzSteps = 0, buzIdx = 0;
+bool      buzLoop  = false;
+uint32_t  buzNextMs = 0;
+const char *buzName = "off";
 
 // =============================================================================
 //  helpers
@@ -466,6 +613,237 @@ void printGpsStatus() {
 }
 
 // -----------------------------------------------------------------------------
+//  Buzzer.  Toggled from a Ticker in interrupt context, so the callback does
+//  the least possible work: flip one pin.
+// -----------------------------------------------------------------------------
+void buzToggleISR() { if (buzPin) *buzPin = !*buzPin; }
+
+void buzSilence() {
+  buzTicker.detach();
+  if (buzPin) *buzPin = 0;              // explicitly low, not merely un-ticked
+}
+
+void buzToneOn(uint16_t hz) {
+  if (!buzPin || hz == 0) { buzSilence(); return; }
+  buzTicker.detach();
+  // Half-period: the pin toggles twice per cycle.
+  buzTicker.attach(mbed::callback(buzToggleISR),
+                   std::chrono::microseconds(500000UL / hz));
+}
+
+void buzzerStop() {
+  buzSilence();
+  buzSeq = nullptr; buzSteps = 0; buzIdx = 0; buzLoop = false;
+  buzName = "off";
+}
+
+void buzzerPlay(const uint16_t *seq, uint8_t steps, bool loop, const char *name) {
+  buzzerStop();
+  buzSeq = seq; buzSteps = steps; buzLoop = loop; buzName = name;
+  buzIdx = 0; buzNextMs = millis();     // first step lands on the next service
+}
+
+// Advances the pattern.  Called every loop iteration; never blocks.
+void buzzerService() {
+  if (!buzSeq) return;
+  if ((long)(millis() - buzNextMs) < 0) return;
+
+  if (buzIdx >= buzSteps) {
+    if (!buzLoop) { buzzerStop(); return; }
+    buzIdx = 0;
+  }
+  uint16_t hz = buzSeq[buzIdx * 2];
+  uint16_t ms = buzSeq[buzIdx * 2 + 1];
+  if (ms == 0) { buzzerStop(); return; }   // explicit terminator
+
+  buzToneOn(hz);
+  buzNextMs = millis() + ms;
+  buzIdx++;
+}
+
+void printBuzzerStatus() {
+  Serial.print(F("  BUZZER: pattern "));
+  Serial.print(buzName);
+  Serial.print(F("   pin GP")); Serial.print(BUZZER_PIN);
+  Serial.print(F("   "));
+  Serial.print(BUZ_HZ);
+  Serial.println(F(" Hz"));
+}
+
+// -----------------------------------------------------------------------------
+//  Servo latch control.
+//
+//  servoWrite() is the only path to the pin, so the clamp and the record of
+//  what was commanded cannot be bypassed by a caller in a hurry.
+// -----------------------------------------------------------------------------
+void servoWrite(uint16_t us) {
+  if (us < SERVO_MIN_US) us = SERVO_MIN_US;
+  if (us > SERVO_MAX_US) us = SERVO_MAX_US;
+  if (!latch.attached()) return;        // disarmed: nothing to write to
+  servoNowUs = us;
+  latch.writeMicroseconds(us);
+  servoLastMoveMs = millis();
+  servoDetachAtMs = 0;                  // a fresh move cancels a pending detach
+}
+
+// Attach and detach ARE the arm and safe states.  Detached, the library stops
+// its ticker and the pin is simply an output sitting low -- no pulse train at
+// all, so the servo is not being commanded anywhere.  That is a stronger claim
+// than "commanded to a pulse width of zero", which is not a thing a servo
+// understands.
+void servoAttach() {
+  if (!latch.attached()) latch.attach(SERVO_PIN, SERVO_MIN_US, SERVO_MAX_US);
+}
+
+// Detaches -- but NEVER truncates a move that is still under way.
+//
+// This was a real bug.  The viewer fires with `!fire` and then immediately
+// sends `!safe`, which is the right interlock: a test rig must not stay hot
+// after doing the thing.  But `!safe` detached the servo a millisecond after
+// `!fire` had written the released position, cutting the pulse train long
+// before the horn could travel.  So Fire, and every condition-triggered fire,
+// did nothing -- while `!us` and `!latch`, which leave the servo attached,
+// worked perfectly.  The interlock defeated the action it was guarding.
+//
+// Safe now keeps its whole meaning -- servoArmed is already false, so no NEW
+// motion is accepted from this instant -- and simply lets the move already
+// commanded finish before the pulse train stops.
+void servoRelease() {
+  uint32_t since = millis() - servoLastMoveMs;
+  if (latch.attached() && servoNowUs && since < SERVO_SETTLE_MS) {
+    servoDetachAtMs = servoLastMoveMs + SERVO_SETTLE_MS;
+    if (servoDetachAtMs == 0) servoDetachAtMs = 1;   // 0 means "none pending"
+    return;
+  }
+  servoDetachAtMs = 0;
+  servoNowUs = 0;
+  if (latch.attached()) latch.detach();
+}
+
+// Completes a deferred detach.  Called every loop iteration.
+void servoService() {
+  if (servoDetachAtMs && (long)(millis() - servoDetachAtMs) >= 0) {
+    servoDetachAtMs = 0;
+    servoNowUs = 0;
+    if (latch.attached()) latch.detach();
+    Serial.println(F("  SERVO pulse train stopped - move complete"));
+  }
+}
+
+void printServoStatus() {
+  Serial.print(F("  SERVO: "));
+  Serial.print(servoArmed ? F("ARMED") : F("safe"));
+  if (servoFired) Serial.print(F(" (FIRED)"));
+  Serial.print(F("   pin GP")); Serial.print(SERVO_PIN);
+  Serial.print(F("   commanded "));
+  if (servoNowUs) { Serial.print(servoNowUs); Serial.print(F(" us")); }
+  else            Serial.print(F("idle - not driven"));
+  Serial.print(F("   latched=")); Serial.print(servoLatchedUs);
+  Serial.print(F(" released=")); Serial.print(servoReleasedUs);
+  Serial.println(F(" us"));
+  Serial.println(F("  (commanded, NOT measured - a servo has no feedback path)"));
+}
+
+void servoArm(bool on) {
+  servoArmed = on;
+  if (on) {
+    servoLastCmdMs = millis();
+    // Attaching starts no pulses of its own: the library only begins its
+    // ticker on the first writeMicroseconds().  So arming still moves nothing,
+    // which is the property that matters -- if arming drove the horn, the act
+    // of preparing to test would be the test.
+    servoAttach();
+    buzzerPlay(BUZ_CHIRP, 2, false, "chirp");   // 8.5: the arming chirp
+    Serial.println(F("  SERVO ARMED - latch will respond to commands"));
+  } else {
+    servoRelease();
+    if (servoDetachAtMs) {
+      Serial.print(F("  SERVO SAFE - no new commands; finishing move, pulse stops in "));
+      Serial.print((long)(servoDetachAtMs - millis()));
+      Serial.println(F(" ms"));
+    } else {
+      Serial.println(F("  SERVO SAFE - pin no longer driven"));
+    }
+  }
+}
+
+bool servoFire() {
+  if (!servoArmed) { Serial.println(F("  SERVO refused: not armed")); return false; }
+  if (servoFired)  { Serial.println(F("  SERVO refused: already fired, re-latch first")); return false; }
+  servoWrite(servoReleasedUs);
+  servoFired = true;
+  buzzerPlay(BUZ_DOUBLE, 4, false, "double");   // audible confirmation of a fire
+  Serial.print(F("  SERVO FIRED -> ")); Serial.print(servoNowUs); Serial.println(F(" us"));
+  return true;
+}
+
+void servoRelatch() {
+  if (!servoArmed) { Serial.println(F("  SERVO refused: not armed")); return; }
+  servoWrite(servoLatchedUs);
+  servoFired = false;
+  Serial.print(F("  SERVO re-latched -> ")); Serial.print(servoNowUs); Serial.println(F(" us"));
+}
+
+// -----------------------------------------------------------------------------
+//  Buffered '!' commands.  The single-character commands are dispatched the
+//  instant they arrive and stay that way; anything needing a NUMBER cannot be,
+//  so those are introduced with '!' and terminated by a newline.  Keeping the
+//  two schemes visibly separate means the old commands cannot be broken by a
+//  parser change, and a truncated line can never be mistaken for one of them.
+// -----------------------------------------------------------------------------
+void handleLineCommand(char *cmd) {
+  servoLastCmdMs = millis();            // any command at all is a sign of life
+
+  if      (!strcmp(cmd, "arm"))   servoArm(true);
+  else if (!strcmp(cmd, "safe"))  servoArm(false);
+  else if (!strcmp(cmd, "fire"))  servoFire();
+  else if (!strcmp(cmd, "latch")) servoRelatch();
+  else if (!strcmp(cmd, "srv"))   printServoStatus();
+  else if (!strcmp(cmd, "bz"))    printBuzzerStatus();
+  else if (!strncmp(cmd, "buz ", 4)) {
+    const char *w = cmd + 4;
+    if      (!strcmp(w, "off"))    { buzzerStop(); }
+    else if (!strcmp(w, "chirp"))  buzzerPlay(BUZ_CHIRP,  2, false, "chirp");
+    else if (!strcmp(w, "double")) buzzerPlay(BUZ_DOUBLE, 4, false, "double");
+    else if (!strcmp(w, "locate")) buzzerPlay(BUZ_LOCATE, 2, true,  "locate");
+    else if (!strcmp(w, "alarm"))  buzzerPlay(BUZ_ALARM,  2, true,  "alarm");
+    else { Serial.print(F("  !buz: unknown pattern ")); Serial.println(w); return; }
+    printBuzzerStatus();
+  }
+  else if (!strncmp(cmd, "beep ", 5)) {
+    char *sp = strchr(cmd + 5, ' ');
+    uint16_t hz = (uint16_t)atoi(cmd + 5);
+    uint16_t ms = sp ? (uint16_t)atoi(sp + 1) : 120;
+    if (hz < 100 || hz > 20000) { Serial.println(F("  !beep: 100-20000 Hz")); return; }
+    static uint16_t oneShot[4];
+    oneShot[0] = hz; oneShot[1] = ms; oneShot[2] = 0; oneShot[3] = 0;
+    buzzerPlay(oneShot, 2, false, "beep");
+    Serial.print(F("  BUZZER beep ")); Serial.print(hz);
+    Serial.print(F(" Hz for ")); Serial.print(ms); Serial.println(F(" ms"));
+  }
+  else if (!strcmp(cmd, "hb"))    { /* heartbeat: the timestamp above is it */ }
+  else if (!strncmp(cmd, "us ", 3)) {
+    if (!servoArmed) { Serial.println(F("  SERVO refused: not armed")); return; }
+    servoWrite((uint16_t)atoi(cmd + 3));
+    Serial.print(F("  SERVO -> ")); Serial.print(servoNowUs); Serial.println(F(" us"));
+  }
+  else if (!strncmp(cmd, "pos ", 4)) {
+    char *sp = strchr(cmd + 4, ' ');
+    if (!sp) { Serial.println(F("  !pos needs two values: !pos <latched_us> <released_us>")); return; }
+    *sp = 0;
+    uint16_t a = (uint16_t)atoi(cmd + 4), b = (uint16_t)atoi(sp + 1);
+    if (a < SERVO_MIN_US || a > SERVO_MAX_US || b < SERVO_MIN_US || b > SERVO_MAX_US) {
+      Serial.println(F("  !pos refused: outside the 600-2400 us clamp"));
+      return;
+    }
+    servoLatchedUs = a; servoReleasedUs = b;
+    Serial.print(F("  SERVO endpoints: latched ")); Serial.print(a);
+    Serial.print(F(" us, released ")); Serial.print(b); Serial.println(F(" us"));
+  }
+  else { Serial.print(F("  !? unknown command: ")); Serial.println(cmd); }
+}
+
+// -----------------------------------------------------------------------------
 //  Gyro zero-rate offset.  Every gyro has one, it changes with temperature,
 //  and it is what walks your attitude estimate off during a flight when there
 //  is no reliable gravity vector to correct against.  Board must be still.
@@ -630,6 +1008,20 @@ void setup() {
     Serial.println(F("  - u-blox DDC is 0x42; give it a moment after power-up"));
   }
 
+  // ---- servo latch.  Deliberately NOT attached here: an unattached pin
+  //      emits no pulse train, so nothing is commanded until somebody arms
+  //      the latch on purpose. -------------------------------------------
+  Serial.println();
+  buzPin = new mbed::DigitalOut(digitalPinToPinName(BUZZER_PIN));
+  *buzPin = 0;
+  Serial.print(F("Buzzer on GP")); Serial.print(BUZZER_PIN);
+  Serial.print(F(" - silent at boot, ")); Serial.print(BUZ_HZ);
+  Serial.println(F(" Hz"));
+
+  Serial.print(F("Servo latch on GP")); Serial.print(SERVO_PIN);
+  Serial.println(F(" - SAFE at boot, no pulses emitted"));
+  Serial.println(F("  arm it with !arm before anything will move"));
+
   Serial.println();
   calibrateGyro();
   Serial.println();
@@ -652,6 +1044,21 @@ void loop() {
   // ---- commands ----------------------------------------------------------
   while (Serial.available()) {
     char c = Serial.read();
+
+    // A '!' opens a buffered line command; everything up to the newline is
+    // collected rather than dispatched character by character.
+    if (cmdActive) {
+      if (c == '\n' || c == '\r') {
+        cmdBuf[cmdLen] = 0;
+        cmdActive = false;
+        if (cmdLen) handleLineCommand(cmdBuf);
+        cmdLen = 0;
+      } else if (cmdLen < (int)sizeof(cmdBuf) - 1) {
+        cmdBuf[cmdLen++] = c;
+      }
+      continue;
+    }
+    if (c == '!') { cmdActive = true; cmdLen = 0; continue; }
     // The header is for the human-readable table only.  Reprinting it while
     // the viewer is streaming injects non-telemetry lines into the feed the
     // viewer is parsing -- harmless, since it ignores anything that is not a
@@ -678,6 +1085,20 @@ void loop() {
     }
     else if (c == 'g' || c == 'G') { Serial.println(); printGpsStatus(); }
     else if (c == 'h' || c == 'H') printHeader();
+  }
+
+  buzzerService();
+  servoService();
+
+  // ---- servo deadman -----------------------------------------------------
+  // An armed actuator that has stopped hearing from anyone is the bench
+  // hazard, so silence disarms it.  Note this is the OPPOSITE of what flight
+  // firmware must do, where losing the link may not disarm anything -- one
+  // more reason this code is a test harness and not the flight path.
+  if (servoArmed && (millis() - servoLastCmdMs) > SERVO_DEADMAN_MS) {
+    Serial.println();
+    Serial.println(F("  SERVO auto-safe: no host command for 3 s"));
+    servoArm(false);
   }
 
   // ---- fixed rate --------------------------------------------------------
@@ -805,6 +1226,15 @@ void loop() {
         Serial.print(F("0,0,-1"));
       }
     }
+
+    // Servo state, so the viewer displays the BOARD's belief rather than its
+    // own.  If the two ever disagree about whether the latch is armed, that
+    // disagreement is the thing you most need to see.
+    Serial.print(',');
+    Serial.print(servoFired ? 2 : (servoArmed ? 1 : 0));
+    Serial.print(',');
+    Serial.print(servoNowUs);
+
     Serial.println();
     return;
   }

@@ -1,7 +1,7 @@
 # Avionics Status Report
 
 **Water pressure rocket avionics — build status**
-v0.2.1 · September 2026
+v0.3 · September 2026
 
 Where the build has actually got to, subsystem by subsystem. The design is
 specified in [`avionics_documentation.md`](avionics_documentation.md); this
@@ -22,8 +22,9 @@ runs on synthetic data.** Everything else is specified, not built.
 | SAM-M8Q GPS | **Wired, configured, 3D fix obtained.** Indoor sky view only; accuracy not yet usable |
 | Bench diagnostics | **Working on hardware** for all four sensors |
 | Pico W ground station + viewer | **Working** — synthetic telemetry only |
+| MG90D servo latch | **Wired to GP6, driven by the diagnostics sketch.** Bench harness only |
 | RFM95W LoRa ×2 | Not connected — no radio link exists |
-| MG90D servo, latch, deployment | Not connected, not built |
+| Latch mechanism, collar joint | Not built — the servo drives nothing yet |
 | Reed switch arming interlock | Not connected |
 | LS3040 buzzer | Not connected |
 | Airframe | Not built |

@@ -87,7 +87,7 @@ def check_producer(ns, clock):
           % (PAD, APO, REACQ, LOOP))
 
     n0 = len(Telemetry().latest.split(","))
-    check(n0 == 16, "initial frame has %d fields, expected 16 (V + 15)" % n0)
+    check(n0 == 18, "initial frame has %d fields, expected 18 (V + 17)" % n0)
 
     tel = Telemetry()
     tel.set_mode("flight")
@@ -101,7 +101,7 @@ def check_producer(ns, clock):
         line = tel.step(dt)
         frames.append(line)
         parts = line.split(",")
-        check(len(parts) == 16, "frame at t=%.2f has %d fields" % (tel.t, len(parts)))
+        check(len(parts) == 18, "frame at t=%.2f has %d fields" % (tel.t, len(parts)))
         v = [float(x) for x in parts[1:]]
         peak_hg = max(peak_hg, v[9])
         peak_lsm6 = max(peak_lsm6, math.sqrt(v[0] ** 2 + v[1] ** 2 + v[2] ** 2))
@@ -114,6 +114,13 @@ def check_producer(ns, clock):
                   "no-fix frame at t=%.2f still carries a position" % tel.t)
             check(v[14] < 0, "no-fix frame at t=%.2f claims an accuracy" % tel.t)
         phases.setdefault(round(tel.t % LOOP), v[10])
+
+    # This station has no latch of its own, and says so rather than implying
+    # a safe one. -1 is "not on this source"; 0 would mean "safe", which is a
+    # claim about hardware that is not here.
+    v = [float(x) for x in frames[-1].split(",")[1:]]
+    check(v[15] == -1, "synthetic source should report srv = -1, got %s" % v[15])
+    check(v[16] == 0, "synthetic source should report srvus = 0, got %s" % v[16])
 
     print("  peak |a| on LSM6 fields %.2f g   peak high-g %.2f g" % (peak_lsm6, peak_hg))
     check(peak_hg > 5.0, "high-g never reached ~6 g (got %.2f)" % peak_hg)

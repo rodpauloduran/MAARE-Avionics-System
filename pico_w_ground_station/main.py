@@ -113,7 +113,7 @@ class Telemetry:
         self.boot = time.ticks_ms()
         self.frames = 0
         self.latest = ("V,0.0000,0.0000,1.0000,0.00,0.00,0.00,0.000,0.000,0"
-                       ",1.00,0,0,0.0000000,0.0000000,-1.00")
+                       ",1.00,0,0,0.0000000,0.0000000,-1.00,-1,0")
         # When the SOURCE last produced a frame -- not when one was last sent
         # to a browser. The difference is the whole point: a silent radio and a
         # motionless rocket both leave `latest` unchanged, and only this
@@ -331,8 +331,10 @@ class Telemetry:
         az = max(-LSM6_RANGE_G, min(LSM6_RANGE_G, az))
 
         fix, sats, lat, lon, hacc = self._gps()
+        # srv = -1: this station has no latch of its own to report. Over the
+        # radio the flight computer's real state would arrive here instead.
         self.set_line(
-            "V,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.3f,%.3f,%d,%.2f,%d,%d,%.7f,%.7f,%.2f" % (
+            "V,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.3f,%.3f,%d,%.2f,%d,%d,%.7f,%.7f,%.2f,-1,0" % (
                 ax, ay, az, gx, gy, gz, alt, vel, ms, hg, fix, sats, lat, lon, hacc))
         return self.latest
 

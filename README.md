@@ -20,7 +20,7 @@ bottom.*
 
 ---
 
-## Status: v0.2.1 — work in progress
+## Status: v0.3 — work in progress
 
 Early. **All four I²C sensors are on the flight computer and confirmed
 working** and the ground segment works on synthetic data. Everything else in this repository is **design
@@ -34,8 +34,9 @@ intent, not built hardware.**
 | SAM-M8Q GPS | **Wired, configured, 3D fix obtained** — indoor sky view only, accuracy not yet usable |
 | Bench diagnostics (`rocket_diagnostics/`) | Working on hardware, all four sensors |
 | Pico W ground station + viewer | Working — **synthetic telemetry only** |
+| MG90D servo latch | **Wired to GP6 and driven** — bench harness only, no flight deployment code |
 | RFM95W LoRa ×2 | Not connected — no radio link exists |
-| MG90D servo, latch, deployment | Not connected, not built |
+| Latch mechanism, collar joint | Not built — the servo drives nothing yet |
 | Reed switch arming interlock | Not connected |
 | LS3040 buzzer | Not connected |
 | Airframe | Not built |
@@ -78,6 +79,7 @@ documents disagree, that one wins.
 | [`avionics_status_report.md`](avionics_status_report.md) | Project status summary |
 | `water_rocket_avionics_bom.xlsx` | Bill of materials — costs, suppliers, phasing, per-part justification |
 | [`rocket_diagnostics/`](rocket_diagnostics/) | Bench diagnostics sketch (verified working on hardware) |
+| [`servo_smoke/`](servo_smoke/) | Minimal servo sweep on GP6 — isolates a stationary latch as firmware versus wiring |
 | `rocket_attitude_viewer.html` | **Live 3D viewer.** Attitude and trajectory tabs; Web Serial over USB, or SSE over Wi-Fi |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer — the bench path that works today |
 | [`tools/checks/`](tools/checks/) | Headless checks for the ground station model and viewer builds — no hardware needed |

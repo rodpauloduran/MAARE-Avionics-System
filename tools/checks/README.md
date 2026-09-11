@@ -47,6 +47,11 @@ fed the 1000 frames the model just produced:
 - the trajectory legend does not collide with the stage hint: the hint is
   hidden on that tab and restored on the attitude tab, and the legend draws a
   backing panel sized to its own text
+- the **deployment harness refuses to fire** while disarmed, when a condition's
+  sensor cannot be read, before its sustain window has elapsed, and when `all`
+  mode has an unmet condition — and does fire when armed, sustained and matched
+- firing **auto-safes** the latch, so a test rig never stays hot
+- `Export` emits the thresholds as C constants
 - a render pass completes in both stage modes
 - a legacy 9-field frame is still accepted, and a malformed frame is rejected
   exactly once
