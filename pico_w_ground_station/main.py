@@ -6,10 +6,15 @@
 #  Events.  No router, no internet, no app install: connect to the SSID
 #  below and open http://192.168.4.1
 #
-#  RIGHT NOW the telemetry is SYNTHETIC.  The radio link is not wired yet,
-#  so this exists to prove out the viewing and UI half of the system.  When
-#  the radio arrives, there is exactly one function to replace — see the
-#  block marked "RADIO HOOK" near the bottom.
+#  TELEMETRY SOURCES, selected explicitly -- never switched automatically:
+#    uart     the flight computer, over a wire into GP1.  The v0.3.1 stand-in
+#             for the radio, and the default.  See "WIRED LINK" below.
+#    bench / flight / still   synthetic profiles, for UI work with no board.
+#
+#  There is deliberately NO fallback from uart to synthetic when the wire goes
+#  quiet.  Quietly substituting plausible fake data for a dead link is the
+#  single worst thing this display could do; instead the stream goes stale and
+#  the viewer says so.
 #
 #  INSTALL
 #    1. Flash MicroPython for Pico W (rp2-pico-w UF2) from micropython.org
@@ -25,7 +30,8 @@
 #    /            the viewer
 #    /stream      SSE telemetry, one "V,..." frame per event
 #    /health      JSON status, handy for debugging from a laptop
-#    /mode?m=     bench | flight | still   — switches the synthetic source
+#    /mode?m=     uart | bench | flight | still   — selects the source
+#    /cmd?c=      a board command, relayed up the wire (wired source only)
 # =============================================================================
 
 import network
@@ -48,6 +54,22 @@ from machine import Pin
 # ----------------------------------------------------------------------------
 SSID      = "ROCKET-GS"
 PASSWORD  = "rocket12345"        # WPA2 requires at least 8 characters
+
+# That default is published in a public repository -- and joining this network
+# now means being able to ARM AND FIRE THE LATCH.  Put a real password in
+# station_secret.py on the board (it is git-ignored, never committed):
+#     AP_PASSWORD = "something long"
+try:
+    from station_secret import AP_PASSWORD
+    if 8 <= len(AP_PASSWORD) <= 63:
+        PASSWORD = AP_PASSWORD
+        PASSWORD_IS_DEFAULT = False
+    else:
+        print("station_secret.py: AP_PASSWORD must be 8-63 characters; "
+              "using the default")
+        PASSWORD_IS_DEFAULT = True
+except ImportError:
+    PASSWORD_IS_DEFAULT = True
 CHANNEL   = 6
 PORT      = 80
 RATE_HZ   = 25                   # telemetry frames per second
@@ -57,6 +79,32 @@ FRAME_DT  = 1.0 / RATE_HZ
 # Deliberately tighter than the viewer's own 1.5 s staleness timeout, so the
 # viewer's timer starts promptly rather than both waiting on each other.
 SOURCE_STALE_MS = 1000
+
+# --- wired link (v0.3.1 radio stand-in) -------------------------------------
+# UART0 on GP0 (TX) / GP1 (RX), matching the flight computer's Serial1.  The
+# baud rate must match rocket_diagnostics exactly; 460800 is chosen on THAT
+# side, because the Mbed core's UART write blocks the flight loop per byte.
+DEFAULT_MODE    = "uart"
+LINK_UART_ID    = 0
+LINK_TX_PIN     = 0
+LINK_RX_PIN     = 1
+LINK_BAUD       = 460800
+LINK_RXBUF      = 2048           # a few hundred ms of lines; ample
+LINK_MIN_FIELDS = 8              # ax..vel: the oldest frame the viewer takes
+LINK_MAX_FIELDS = 40
+LINK_MAX_LINE   = 512            # bytes with no newline = not our framing
+
+# --- uplink (phone -> station -> wire -> flight computer) -------------------
+# Only these reach the wire, and only in canonical form -- whatever a client
+# sends is rebuilt from the allowlist, never passed through.  No 'v', 'c' or
+# 'h': those only change what the flight computer's USB port prints.
+CMD_PLAIN       = ("arm", "safe", "fire", "latch", "srv", "hb", "bz", "z", "b", "r", "g")
+CMD_BUZ         = ("off", "chirp", "double", "locate", "alarm")
+CMD_MAX_LEN     = 40
+SERVO_US_MIN    = 600            # must match the flight computer's clamp
+SERVO_US_MAX    = 2400
+MSG_KEEP        = 120            # board messages held for late-joining phones
+MSG_REPLAY      = 60             # how many a newly connected phone is sent
 
 # --- flight profile timing, shared by the motion model and the GNSS model ----
 # These were local to _flight(). They are module-level now because _gps() has
@@ -108,8 +156,23 @@ led = Pin("LED", Pin.OUT)
 # ----------------------------------------------------------------------------
 class Telemetry:
     def __init__(self):
-        self.mode = "bench"
+        self.mode = DEFAULT_MODE
         self.t = 0.0
+        # Wired-link bookkeeping.  Counted in EVERY mode, so /health can say
+        # whether the wire works even while you are looking at a synthetic
+        # profile -- a link you can only check by trusting it is no check.
+        self.link_ok = 0
+        self.link_bad = 0
+        self.link_last = None
+        self.link_buf = b""
+        self.link_msgs = 0
+        # Board messages ("M," lines) for the phones' consoles.  A log, not a
+        # latest-value: each client must see each message once, so they carry
+        # sequence numbers and every stream tracks where it has got to.
+        self.msgs = []
+        self.msg_seq = 0
+        self.cmd_sent = 0
+        self.cmd_refused = 0
         self.boot = time.ticks_ms()
         self.frames = 0
         self.latest = ("V,0.0000,0.0000,1.0000,0.00,0.00,0.00,0.000,0.000,0"
@@ -122,11 +185,182 @@ class Telemetry:
 
 
     def set_mode(self, m):
-        if m in ("bench", "flight", "still"):
+        if m in ("uart", "bench", "flight", "still"):
             self.mode = m
             self.t = 0.0
             return True
         return False
+
+    def source(self):
+        return "uart" if self.mode == "uart" else "synthetic"
+
+    def tick(self, dt):
+        """Advance the synthetic model -- unless the wire is the source.
+
+        In uart mode the model must not run at all.  If it did, it would keep
+        calling set_line() and refreshing the freshness timestamp, and a dead
+        wire would never read as stale.  That is the staleness machinery
+        defeated from the inside.
+        """
+        if self.mode != "uart":
+            self.step(dt)
+
+    def accept_line(self, raw):
+        """One line off the wire.  Adopted only if it is a whole frame.
+
+        Validated here, before it reaches a browser, because a wire delivers
+        things a clean producer never does: the tail of a line cut off when
+        the cable went in, a board rebooting mid-frame, noise on a loose
+        jumper.  The viewer would reject most of it too, but it should never
+        have to -- and a half-line that happens to parse is worse than one
+        that does not.
+
+        Returns True if the line was a valid frame (whether or not it was
+        used; it is only adopted in uart mode).
+        """
+        try:
+            if isinstance(raw, (bytes, bytearray)):
+                raw = raw.decode()
+            line = raw.strip()
+        except Exception:
+            self.link_bad += 1
+            return False
+        if line.startswith("M,"):
+            # Something the flight computer SAID -- an acknowledgement, a
+            # refusal, a status report.  Forwarded to the phones' consoles, and
+            # only while the wire is the selected source: a board message
+            # scrolling past under a synthetic display would be describing a
+            # vehicle that is not the one on screen.
+            self.link_msgs += 1
+            self.link_last = time.ticks_ms()
+            if self.mode == "uart":
+                self.push_msg(line[2:])
+            return True
+        if not line.startswith("V,"):
+            self.link_bad += 1
+            return False
+        parts = line[2:].split(",")
+        if not (LINK_MIN_FIELDS <= len(parts) <= LINK_MAX_FIELDS):
+            self.link_bad += 1
+            return False
+        try:
+            for f in parts:
+                float(f)
+        except ValueError:
+            self.link_bad += 1
+            return False
+
+        self.link_ok += 1
+        self.link_last = time.ticks_ms()
+        if self.mode == "uart":
+            self.set_line(line)
+        return True
+
+    def feed(self, chunk):
+        """Raw bytes off the UART, in whatever pieces they arrived.
+
+        Lives here rather than in uart_reader so it can be tested: this is
+        where wire bugs actually hide -- a frame split across two reads, half
+        a line left over from when the cable went in, a baud mismatch that
+        produces a stream with no newlines at all.
+        """
+        if chunk:
+            self.link_buf += chunk
+        while True:
+            i = self.link_buf.find(b"\n")
+            if i < 0:
+                break
+            self.accept_line(self.link_buf[:i])
+            self.link_buf = self.link_buf[i + 1:]
+        if len(self.link_buf) > LINK_MAX_LINE:
+            # This much without a newline is not our framing -- a baud
+            # mismatch, most likely.  Count it and resynchronise.
+            self.link_bad += 1
+            self.link_buf = b""
+
+    def push_msg(self, text):
+        self.msg_seq += 1
+        self.msgs.append((self.msg_seq, text))
+        if len(self.msgs) > MSG_KEEP:
+            self.msgs.pop(0)
+
+    def msgs_since(self, seq):
+        return [m for m in self.msgs if m[0] > seq]
+
+    def prepare_command(self, raw):
+        """A command from a phone -> (canonical command, None) or (None, why).
+
+        Everything that decides what may reach the flight computer is in this
+        one function, so it can be tested without a board:
+
+          * Board commands are refused unless the WIRE is the selected source.
+            Arming a real latch while the display shows synthetic data would
+            mean the latch state on screen belongs to a vehicle that does not
+            exist -- the display's one job, inverted.
+          * The command is rebuilt from the allowlist rather than forwarded.
+            Nothing a client types passes through verbatim: unknown words,
+            extra arguments, out-of-range numbers, stray bytes are all refused.
+        """
+        def refuse(why):
+            self.cmd_refused += 1
+            return None, why
+
+        if self.mode != "uart":
+            return refuse("the display is on a synthetic source; board "
+                          "commands are only accepted on the wired link")
+
+        # Minimal percent-decoding: MicroPython has no urllib, and the
+        # station's query parser leaves values encoded.
+        text = raw.replace("+", " ")
+        out, i = [], 0
+        while i < len(text):
+            ch = text[i]
+            if ch == "%" and i + 3 <= len(text):
+                try:
+                    out.append(chr(int(text[i + 1:i + 3], 16)))
+                    i += 3
+                    continue
+                except ValueError:
+                    pass
+            out.append(ch)
+            i += 1
+        c = "".join(out).strip()
+
+        if c.startswith("!"):
+            c = c[1:]
+        if not c or len(c) > CMD_MAX_LEN:
+            return refuse("empty or too long")
+        for ch in c:
+            if not (ch == " " or "a" <= ch <= "z" or "0" <= ch <= "9"):
+                return refuse("unexpected character")
+        w = c.split()
+
+        if len(w) == 1 and w[0] in CMD_PLAIN:
+            return "!" + w[0], None
+        if len(w) == 2 and w[0] == "buz" and w[1] in CMD_BUZ:
+            return "!buz " + w[1], None
+        if len(w) == 2 and w[0] == "us" and w[1].isdigit():
+            n = int(w[1])
+            if SERVO_US_MIN <= n <= SERVO_US_MAX:
+                return "!us %d" % n, None
+            return refuse("pulse width outside %d-%d us"
+                          % (SERVO_US_MIN, SERVO_US_MAX))
+        if len(w) == 3 and w[0] == "pos" and w[1].isdigit() and w[2].isdigit():
+            a, b = int(w[1]), int(w[2])
+            if SERVO_US_MIN <= a <= SERVO_US_MAX and SERVO_US_MIN <= b <= SERVO_US_MAX:
+                return "!pos %d %d" % (a, b), None
+            return refuse("endpoint outside %d-%d us" % (SERVO_US_MIN, SERVO_US_MAX))
+        if len(w) == 3 and w[0] == "beep" and w[1].isdigit() and w[2].isdigit():
+            hz, ms = int(w[1]), int(w[2])
+            if 100 <= hz <= 20000 and 1 <= ms <= 5000:
+                return "!beep %d %d" % (hz, ms), None
+            return refuse("beep outside 100-20000 Hz / 1-5000 ms")
+        return refuse("not an allowed command")
+
+    def link_age_ms(self):
+        if self.link_last is None:
+            return -1
+        return time.ticks_diff(time.ticks_ms(), self.link_last)
 
     # --- helpers ---------------------------------------------------------
     @staticmethod
@@ -492,8 +726,17 @@ async def serve_stream(w):
     # tell the client how fast to expect frames
     w.write(("retry: 1000\n\nevent: hello\ndata: %d\n\n" % RATE_HZ).encode())
     await w.drain()
+    # A phone that connects late still sees the recent past -- the boot
+    # banner, the last few acknowledgements -- rather than a blank console.
+    last_msg = tel.msg_seq - MSG_REPLAY
     try:
         while True:
+            # Messages go out whether or not telemetry is stale: while the
+            # board is blocked zeroing the barometer, its progress text is
+            # exactly what the phone should be showing.
+            for seq, text in tel.msgs_since(last_msg):
+                w.write(("event: msg\ndata: %s\n\n" % text).encode())
+                last_msg = seq
             if tel.stale():
                 # Source has gone quiet. Send an SSE comment instead of a data
                 # frame: EventSource ignores comment lines, so the connection
@@ -526,7 +769,16 @@ async def serve_health(w):
         "clients": clients,
         "mem_free": free,
         "uptime_s": time.ticks_diff(time.ticks_ms(), tel.boot) // 1000,
-        "source": "synthetic",
+        "source": tel.source(),
+        "link": {
+            "baud": LINK_BAUD,
+            "lines_ok": tel.link_ok,
+            "lines_bad": tel.link_bad,
+            "last_line_age_ms": tel.link_age_ms(),
+            "messages": tel.link_msgs,
+        },
+        "commands": {"sent": tel.cmd_sent, "refused": tel.cmd_refused},
+        "default_password": PASSWORD_IS_DEFAULT,
         "stale": tel.stale(),
         "source_age_ms": time.ticks_diff(time.ticks_ms(), tel.updated),
     })
@@ -577,6 +829,11 @@ async def handle(r, w):
                                "application/json")
             w.write(json.dumps({"ok": ok, "mode": tel.mode}).encode())
             await w.drain()
+        elif base == "/cmd":
+            code, body = run_command(q.get("c", ""))
+            await send_headers(w, code, "application/json")
+            w.write(json.dumps(body).encode())
+            await w.drain()
         elif base == "/favicon.ico":
             await send_headers(w, "204 No Content", "text/plain")
         else:
@@ -614,7 +871,7 @@ async def sampler():
     regardless of how many browsers are connected. When the radio arrives
     this task is replaced by the packet reader."""
     while True:
-        tel.step(FRAME_DT)
+        tel.tick(FRAME_DT)
         await asyncio.sleep(FRAME_DT)
 
 
@@ -625,44 +882,91 @@ async def janitor():
 
 
 # =============================================================================
-#  RADIO HOOK
+#  WIRED LINK  (v0.3.1 -- stand-in for the radio)
 #
-#  When the radio link is built, this is the only part that changes.
-#  Replace Telemetry.frame() with something that reads the most recent
-#  packet the receiver has decoded, e.g.:
+#  The flight computer's Serial1 lands on GP1 and becomes a producer like any
+#  other: every whole frame goes through tel.accept_line() into set_line(), so
+#  staleness, SSE forwarding and the viewer all behave exactly as they will
+#  with a radio.  That is the point of the stand-in -- it tests everything
+#  downstream of the receiver, and nothing about the receiver.
 #
-#      from machine import UART
-#      uart = UART(0, 115200, tx=Pin(0), rx=Pin(1))
-#      _last = "V,0,0,1,0,0,0,0,0,0"
+#  WHEN THE RADIO ARRIVES, this task is what gets replaced -- and note the
+#  replacement will NOT be a UART.  An RFM95W is an SPI transceiver; it gets a
+#  LoRa driver on SPI, decodes the 18-byte packet of 6.2, formats a "V,..."
+#  line, and hands it to tel.accept_line().  Same slot, different plumbing.
 #
-#      async def radio_reader():
-#          global _last
-#          buf = b""
-#          while True:
-#              if uart.any():
-#                  buf += uart.read()
-#                  while b"\n" in buf:
-#                      line, buf = buf.split(b"\n", 1)
-#                      line = line.strip()
-#                      if line.startswith(b"V,"):
-#                          _last = line.decode()
-#              await asyncio.sleep(0.005)
-#
-#  ...then have the SSE loop send _last instead of tel.frame().  Keep the
-#  same "V,..." wire format and the viewer needs no changes at all.
-#
-#  Add radio_reader() to main() as another asyncio task.
+#  It now carries commands UP as well, from the phones, through run_command()
+#  and prepare_command() -- a deliberate choice for the bench rig.  In flight
+#  the latch arms by a reed switch (8.4), and none of this carries over.
+# =============================================================================
+link_uart = None                     # set by uart_reader once the port is open
+
+
+def run_command(raw):
+    """Relay one allowed command to the flight computer.
+
+    "ok" means the station put it on the wire -- NOT that the board did it.
+    Confirmation comes back the way everything else does: the board's own
+    message ("SERVO ARMED ...") and the latch state in the next telemetry frame.
+    """
+    cmd, why = tel.prepare_command(raw)
+    if cmd is None:
+        code = "409 Conflict" if tel.mode != "uart" else "400 Bad Request"
+        return code, {"ok": False, "why": why}
+    if link_uart is None:
+        return "503 Service Unavailable", {"ok": False, "why": "wired link not open"}
+    link_uart.write((cmd + "\n").encode())
+    tel.cmd_sent += 1
+    return "200 OK", {"ok": True, "sent": cmd}
+
+
+def open_link():
+    try:
+        from machine import UART
+    except ImportError:
+        return None
+    try:
+        return UART(LINK_UART_ID, baudrate=LINK_BAUD,
+                    tx=Pin(LINK_TX_PIN), rx=Pin(LINK_RX_PIN), rxbuf=LINK_RXBUF)
+    except TypeError:
+        # MicroPython builds without the rxbuf keyword.  The default ring
+        # buffer is smaller but still holds more than one 25 Hz frame.
+        return UART(LINK_UART_ID, baudrate=LINK_BAUD,
+                    tx=Pin(LINK_TX_PIN), rx=Pin(LINK_RX_PIN))
+
+
+async def uart_reader():
+    global link_uart
+    uart = open_link()
+    link_uart = uart
+    if uart is None:
+        print("Wired link: no UART on this platform")
+        return
+    print("Wired link: UART%d on GP%d (RX) at %d baud"
+          % (LINK_UART_ID, LINK_RX_PIN, LINK_BAUD))
+    while True:
+        n = uart.any()
+        if n:
+            tel.feed(uart.read(n))
+        await asyncio.sleep(0.005)
 # =============================================================================
 
 
 async def main():
     start_ap()
     asyncio.create_task(sampler())
+    asyncio.create_task(uart_reader())
     asyncio.create_task(blink())
     asyncio.create_task(janitor())
     server = await asyncio.start_server(handle, "0.0.0.0", PORT)
     print("HTTP server listening on port %d" % PORT)
-    print("Telemetry source: SYNTHETIC (%s) at %d Hz" % (tel.mode, RATE_HZ))
+    if PASSWORD_IS_DEFAULT:
+        print("WARNING: default AP password - it is in a public repository, and")
+        print("         this network can arm the latch. Create station_secret.py.")
+    if tel.mode == "uart":
+        print("Telemetry source: WIRED LINK (uart) - no synthetic fallback")
+    else:
+        print("Telemetry source: SYNTHETIC (%s) at %d Hz" % (tel.mode, RATE_HZ))
     print("Waiting for a browser...")
     while True:
         await asyncio.sleep(3600)

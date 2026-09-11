@@ -298,7 +298,7 @@ footer{
     <div class="controls">
       <button id="btnConnect" class="primary serial-only">Connect board</button>
       <button id="btnV" disabled class="serial-only">Toggle stream</button>
-      <span class="cmdgroup serial-only"><span class="cmdlabel">Board</span>
+      <span class="cmdgroup"><span class="cmdlabel">Board</span>
         <button id="cmdZ" disabled title="Re-zero ground pressure to here (blocks ~1 s)">Zero baro</button>
         <button id="cmdB" disabled title="Re-measure gyro bias - hold the board still (blocks ~1.5 s)">Gyro bias</button>
         <button id="cmdR" disabled title="Reset the peak trackers, board and display">Reset peaks</button>
@@ -307,9 +307,10 @@ footer{
       <button id="btnDemo" class="serial-only">Run demo</button>
       <button id="btnNet" class="primary net-only" style="display:none">Reconnect</button>
       <select id="selMode" class="net-only" style="display:none">
-        <option value="bench">Bench wobble</option>
-        <option value="flight">Flight profile</option>
-        <option value="still">Hold still</option>
+        <option value="uart">Wired link (UART)</option>
+        <option value="bench">Synthetic: bench wobble</option>
+        <option value="flight">Synthetic: flight profile</option>
+        <option value="still">Synthetic: hold still</option>
       </select>
       <button id="btnZero">Level here</button>
       <button id="btnSmooth">Smoothing: on</button>
@@ -334,7 +335,7 @@ footer{
         <span id="hintSerial">Close the Arduino Serial Monitor first &mdash; only one program can hold the port.
         Connecting sends <code>v</code> automatically; <code>Toggle stream</code> sends it again.</span>
         <span id="hintNet" style="display:none">Streaming from the ground station over Wi-Fi.
-        Telemetry is <b>synthetic</b> until the radio link is wired in.</span>
+        <span id="hintSource">Checking the telemetry source&hellip;</span></span>
       </div>
     </div>
 
@@ -401,7 +402,7 @@ footer{
 
   <footer id="raw">Waiting for data&hellip;</footer>
 
-  <section class="deploy serial-only" id="deploy">
+  <section class="deploy" id="deploy">
     <div class="conhead">
       <button id="depToggle" class="ctab" aria-expanded="false">&#9656; Deployment test</button>
       <span class="conmeta" id="depState">latch: &mdash;</span>
@@ -419,6 +420,9 @@ footer{
         depend on a link (&sect;2.3, &sect;5.4). What this is for is finding the
         numbers that later get compiled into it &mdash; use <b>Export</b> when
         you have them. Keep hands clear of the latch whenever it reads ARMED.
+        <br>The latch stays armed only while <b>this page</b> keeps sending
+        heartbeats. Lock the phone, switch apps or lose Wi-Fi and they stop,
+        and the board disarms itself within 3&nbsp;s &mdash; by design.
       </p>
 
       <div id="depRows"></div>
@@ -1079,10 +1083,30 @@ let lastFrameAt=0, connectedAt=0, nagged=false;
    gone quiet raises nothing. */
 const STALE_MS = 1500;
 let staleNow = false, lastStaleTick = 0;
+/* Whether any frame has arrived on this connection. In network mode, the SSE
+   connection opening proves only that the ground station is up -- it may have
+   nothing at all to forward. "Live" waits for an actual frame. */
+let firstFrameSeen = false;
 
 /* The sketch toggles its telemetry stream on the character 'v'.
    With the Serial Monitor closed, this page is the only thing that can send it. */
+/* Over Wi-Fi a command goes to the ground station's /cmd, which rebuilds it
+   from an allowlist and relays it up the wire. A true result means the STATION
+   accepted it -- not that the board acted. The board's own reply arrives in the
+   console and its latch state in the next frame; those are the confirmation. */
+function sendNet(ch){
+  const c=String(ch).replace(/[\r\n]+$/,'');
+  if(!c) return Promise.resolve(false);
+  return fetch('/cmd?c='+encodeURIComponent(c))
+    .then(r=>r.json().then(j=>{
+      if(!j.ok){ consoleAdd('>> refused by the ground station: '+(j.why||r.status)); return false; }
+      return true;
+    }))
+    .catch(()=>{ consoleAdd('>> ground station unreachable — command not sent'); return false; });
+}
+
 async function sendChar(ch){
+  if(typeof NET_MODE!=='undefined' && NET_MODE) return sendNet(ch);
   if(!writer) return false;
   try{ await writer.write(new TextEncoder().encode(ch)); return true; }
   catch(e){ return false; }
@@ -1375,6 +1399,10 @@ function frame(now){
   // trains people to ignore it, which is worse than not showing it.
   const isStale = !!(liveSrc && lastFrameAt && (now - lastFrameAt > STALE_MS)
                      && now > staleSuppressUntil);
+  if(liveSrc && lastFrameAt && !firstFrameSeen){
+    firstFrameSeen = true;
+    if(!isStale) setStatus('Live','live');
+  }
   if(isStale !== staleNow){
     staleNow = isStale;
     document.body.classList.toggle('stale', isStale);
@@ -1431,6 +1459,34 @@ function setModeUI(){
   }
 }
 
+/* Ask the station what it is actually sending, and show THAT. The selector
+   used to open on "Bench wobble" whatever the station was doing, and the hint
+   said "synthetic" unconditionally -- a display that asserts its source
+   instead of reading it. Both now come from /health. */
+function syncSource(){
+  fetch('/health').then(r=>r.json()).then(j=>{
+    const sel=document.getElementById('selMode');
+    if(sel && j.mode && [...sel.options].some(o=>o.value===j.mode)) sel.value=j.mode;
+    // Board controls live only while the wire is the source. Commanding a real
+    // latch while the display shows synthetic data would put a fictional
+    // vehicle's state on screen beside a real actuator. The station refuses
+    // too; greying the buttons just says so before anyone presses one.
+    const onWire = (j.source==='uart');
+    boardControlsEnabled(onWire);
+    if(!onWire && depArmed) depSetArmed(false, 'source changed away from the wire');
+    const hs=document.getElementById('hintSource');
+    if(!hs) return;
+    if(j.source==='uart'){
+      const age=(j.link && j.link.last_line_age_ms);
+      hs.innerHTML = 'Source: the <b>wired link</b> from the flight computer'
+        + ((age==null || age<0) ? ' &mdash; <b>nothing received yet</b>' : '')
+        + '. If it goes quiet the display dims; it never falls back to synthetic data.';
+    }else{
+      hs.innerHTML = 'Source: <b>synthetic</b> &mdash; a generated profile, not the vehicle.';
+    }
+  }).catch(()=>{});
+}
+
 function connectSSE(){
   if(es){ try{ es.close(); }catch(e){} es=null; }
   setStatus('Connecting…');
@@ -1442,13 +1498,24 @@ function connectSSE(){
     return;
   }
 
+  // What the board SAID: acknowledgements, refusals, status reports, the boot
+  // banner. The station replays recent ones, so a phone that joins late sees
+  // how the board got to where it is.
+  es.addEventListener('msg', e=>{ consoleAdd(e.data); });
+
   es.addEventListener('hello', e=>{
     banner.classList.add('hide');
   });
 
   es.onopen = ()=>{
     esRetry = 0;
-    setStatus('Live','live');
+    // Not 'Live'. With the wired link as the default source and nothing on the
+    // wire, the station connects happily and forwards nothing -- and a display
+    // reading LIVE over a motionless model is the exact confusion the
+    // staleness work exists to prevent. Live is set by the first real frame.
+    setStatus('Connected — waiting for telemetry','stale');
+    firstFrameSeen = false;
+    syncSource();
     banner.classList.add('hide');
     connectedAt = performance.now();
     lastFrameAt = 0; nagged = true;   // no 'press v' nag in network mode
@@ -1476,7 +1543,7 @@ if(NET_MODE){
   });
   document.getElementById('selMode').addEventListener('change', ev=>{
     fetch('/mode?m='+encodeURIComponent(ev.target.value))
-      .then(()=>{ tel.aPeak=0; tel.altPeak=0; sm.init=false; })
+      .then(()=>{ tel.aPeak=0; tel.altPeak=0; sm.init=false; syncSource(); })
       .catch(()=>showBanner('Could not switch source mode.'));
   });
   connectSSE();
@@ -1896,6 +1963,15 @@ function uiExtra(){
    `c` (CSV) and `h` (reprint header) are deliberately NOT exposed: both would
    corrupt the telemetry stream this page is reading. */
 const CMD_BTNS=[['cmdZ','z',3000],['cmdB','b',3500],['cmdR','r',0],['cmdG','g',0]];
+function boardControlsEnabled(on){
+  cmdButtonsEnabled(on);
+  ['depArm','depSendPos','buzChirp','buzDouble','buzLocate','buzAlarm','buzOff']
+    .forEach(function(id){
+      const el=document.getElementById(id);
+      if(el) el.disabled=!on;
+    });
+}
+
 function cmdButtonsEnabled(on){
   for(let i=0;i<CMD_BTNS.length;i++){
     const el=document.getElementById(CMD_BTNS[i][0]);

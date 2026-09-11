@@ -6,10 +6,111 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
-## [Unreleased]
+## [0.3.1] — 2026-09-11
+
+### Added
+
+- **Wired UART downlink, as a stand-in for the radio** while the antenna
+  pigtails and connectors are not on hand. The flight computer writes the §6.6
+  line to `Serial1` (GP0) every tick, whatever its USB port is doing; the
+  ground station reads GP1 into the same producer slot the radio will use. It
+  tests everything downstream of the receiver and nothing about the receiver.
+  **Transmit-only from the flight side**, deliberately: the real link is
+  fire-and-forget, and a wire that could arm the latch from the ground is not a
+  decision to make by accident in a test rig.
+- **Explicit telemetry sources on the ground station** — `uart` (default) or a
+  synthetic profile — with **no fallback** from a dead wire to synthetic data.
+  In `uart` mode the synthetic model does not run, so a quiet wire goes stale
+  instead of being papered over. `/health` reports the source and link counters
+  in every mode.
+- **Frame validation and line reassembly on the station** (`feed()`,
+  `accept_line()`): partial lines, board text, undecodable bytes and wrong
+  field counts are counted and dropped before they reach a browser.
+
+- **Full control from a phone** — board commands and the whole deployment
+  panel, served by the ground station and relayed up the wired link. The wire
+  was built transmit-only first so that ground control of the latch could not
+  arrive by accident; this adds it on purpose, with the constraints that make
+  it tolerable:
+  - `/cmd` **rebuilds every command from an allowlist** rather than forwarding
+    it; unknown words, extra arguments, out-of-range numbers and a second
+    command smuggled after an encoded newline are refused.
+  - The flight computer accepts **framed `!word` lines only** from the wire,
+    never a bare byte — so noise on an unplugged RX pin cannot trigger `z` or
+    `b`. `v`, `c` and `h` have no framed form and cannot be sent up at all.
+    Over-long lines are discarded rather than acted on as a truncated prefix.
+  - **Board commands are refused unless the wire is the selected source**, at
+    the station (`409`) and in the page (buttons greyed, an armed latch told to
+    safe), because a real latch beside a synthetic display is a display lying.
+  - **The deadman is unchanged**: heartbeats come from the page, so locking the
+    phone or switching apps disarms the latch within 3 s.
+- **Board messages reach the phone.** Everything the flight computer says about
+  its state — acknowledgements, refusals, the boot banner, GPS status — is
+  teed to the wire as `M,` lines and fanned out to every phone's console as SSE
+  `msg` events, with recent ones replayed to a phone that joins late.
+- **`station_secret.py`** for the Wi-Fi password, git-ignored. Joining the
+  network now means being able to arm the latch, and the default is public; the
+  station warns at boot and in `/health` while it is still in use.
+- **`tools/checks/viewer_net_checks.js`** — the viewer loaded as the station
+  serves it, over HTTP with fake `fetch` and `EventSource`, checking command
+  routing, refusals, board messages, and that controls die and an armed latch
+  is safed when the source goes synthetic. Mutation-tested: removing either the
+  source guard or the network routing makes it fail.
+
+### Fixed
+
+- **The viewer read `Live` the moment the SSE connection opened**, before any
+  data. With the wire as the default source and nothing on it, that meant LIVE
+  over a motionless model — the exact confusion the staleness work exists to
+  prevent. `Live` now waits for the first real frame.
+- **The source selector and hint asserted a source instead of reading one.**
+  The selector always opened on "Bench wobble" and the hint always said
+  "synthetic". Both now come from `/health`.
+- **§6.5's diagram had the RFM95W talking to the Pico W over UART.** It is an
+  SPI transceiver. Corrected, along with the open item that described the
+  eventual radio producer as a UART reader.
+- The ground station README's copy of the wire format was missing v0.3's
+  `srv,srvus` fields.
+
+### Notes
+
+- **`Serial1.write()` blocks on this core** (`mbed::UnbufferedSerial`,
+  busy-waiting on `writeable()` past the 32-byte FIFO). The link runs at
+  **460800** baud so a ~100-byte line costs the flight loop ~1.5 ms rather than
+  ~6 ms at 115200.
+- **Wiring:** GP0↔GP1 both ways and GND→GND between the boards. Power either
+  each board from its own USB, or one power bank with VSYS joined to VSYS —
+  and in the latter case **move the servo's V+ from VBUS to VSYS**, because
+  VBUS only exists on a board whose own USB is plugged in. 3V3_EN is the
+  regulator's enable input, not a supply — tying it anywhere powers nothing and
+  can switch a board off.
+
+### Known, unresolved
+
+- **Commands sent from a phone have not yet been seen to act on the board.**
+  The phone screenshots confirm the downlink on hardware: live telemetry at
+  23 Hz on the board's clock with zero bad lines, the source read correctly from
+  the station, the latch state reported by the board, and the board's messages
+  reaching the phone's console. They do not show an `arm` or `fire` from the
+  phone producing `SERVO ARMED` or moving the horn.
+- **The station forwards at most its own loop rate, not every frame.** It
+  resends "the latest frame" on a fixed timer rather than forwarding each new
+  one, so its loop period — `FRAME_DT` plus the time to write — caps delivery,
+  and frames the board produced in between are never sent. The 23 Hz in the
+  phone screenshot is that cap showing. The fix is to forward each new frame
+  once, by sequence number, the way board messages already are.
+- **Phone layout:** the stage label runs underneath the stage tabs on a narrow
+  screen, and a deployment condition row wraps so its `×` button stretches the
+  full width.
+- **The phone console fills with a GPS line every 5 s** when the flight
+  computer has no USB host. With nobody on its USB port it stays in table mode,
+  and its 5-second summary's GPS status is teed to the wire along with the
+  messages that matter. The summary should go to USB only.
 
 ### Docs
 
+- **Phone screenshots and bench photographs of the wired rig**, in the
+  README, §6.5, the hardware reference and the ground station README.
 - **Photographs refreshed for v0.3**, and a new `viewer-trajectory.png`. The
   attitude screenshot now shows the deployment panel and serial monitor
   expanded, with the board's own log of a fire; the boot output shows the buzzer
@@ -450,7 +551,8 @@ only, and the tilt inhibit is specified but not implemented.
 
 ---
 
-[Unreleased]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.1.0...v0.2.0

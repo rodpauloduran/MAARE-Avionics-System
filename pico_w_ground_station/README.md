@@ -4,9 +4,22 @@ Turns a Raspberry Pi Pico W into a self-contained Wi-Fi access point that
 serves the attitude viewer and streams telemetry to your phone. No router,
 no internet, no app install.
 
-**Telemetry is synthetic right now.** The radio link isn't wired yet — this
-exists to prove out the viewing and UI half of the system. There's one
-function to replace when the radio arrives (see below).
+**The source is the wired link by default** (v0.3.1): the flight computer's
+UART runs straight into this board, standing in for the radio until the antenna
+pigtails arrive. Synthetic profiles are still selectable for UI work with no
+board attached. From a phone you get the whole viewer, including board commands
+and the deployment test panel.
+
+<p align="center">
+<img src="../docs/images/phone-attitude.jpg" width="23%" alt="The viewer on a phone, served by the ground station: board command buttons, the source selector reading Wired link (UART), status Live, and the 3D model">
+<img src="../docs/images/phone-readouts.jpg" width="23%" alt="The viewer on a phone: readouts for attitude, accelerometer, barometer, high-g, GPS and link, strip charts, and the latch reading safe">
+<img src="../docs/images/phone-trajectory.jpg" width="23%" alt="The trajectory tab on a phone indoors with no fix: a vertical path over the ground grid and a legend explaining the pad-datum gate">
+<img src="../docs/images/phone-deploy.jpg" width="23%" alt="The deployment panel on a phone, with the condition list, endpoints, buzzer buttons, and the serial monitor showing the board's own GPS messages">
+</p>
+
+*On a phone: the header and controls, the readouts, the trajectory tab (no fix
+indoors, so no pad datum and a purely vertical path — as the legend says), and
+the deployment panel with the board's own messages in the console.*
 
 Design reasoning lives in [`avionics_documentation.md`](../avionics_documentation.md)
 §6.5 (ground station) and §6.7 (viewer). That document is the authority if the
@@ -118,7 +131,7 @@ The wire format (§6.6) is identical to what the flight sketch already emits
 over serial, so the viewer needs **no changes**:
 
 ```
-V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc
+V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus
 ```
 
 Keep the `millis` field when the radio goes in: it is the flight computer's own
@@ -134,30 +147,109 @@ inserted, so anything parsing only the first eight or nine still works.
 lets the viewer refuse a pad datum from a bad fix — a 3D fix on five satellites
 will happily sit hundreds of metres off, and the fix type never says so.
 
-The architecture is already producer/consumer: one task produces frames, any
-number of browsers consume them.
+The architecture is producer/consumer: one task produces frames, any number of
+browsers consume them.
 
-Replace the `sampler()` task with a packet reader:
+### The wired link (v0.3.1)
+
+![Four jumpers joining the flight stack to the Pico W, which has no USB cable
+of its own](../docs/images/bench-wired-link-2.jpg)
+
+Until the antenna pigtails arrive, the flight computer's UART0 is wired
+straight into this board's, and that **is** the producer now — the default
+source, `uart`. Every chunk off the wire goes through `tel.feed()`, which
+reassembles lines across read boundaries, and `tel.accept_line()`, which
+rejects anything that is not a whole frame: the tail of a line cut off when the
+cable went in, board text, a baud mismatch that never produces a newline. Only
+whole frames reach `set_line()`, and so a browser.
+
+| Flight Pico | | Pico W | |
+|---|---|---|---|
+| **GP0** — UART0 TX, pin 1 | → | **GP1** — UART0 RX, pin 2 | telemetry down |
+| **GP1** — UART0 RX, pin 2 | ← | **GP0** — UART0 TX, pin 1 | commands up — needed for phone control |
+| **GND**, pin 3 | — | **GND**, pin 3 | required — no shared ground, no signal reference |
+
+**Power: two setups work.**
+
+- **Each Pico on its own USB**, nothing else between them.
+- **One power bank, VSYS joined to VSYS** (pin 39 to pin 39) — the bench setup
+  in use. Safe: each board's Schottky diode-ORs onto the shared rail, even if
+  both are also on USB. It also satisfies the rule below automatically, since
+  both boards power up together. **But move the servo's V+ from VBUS to
+  VSYS.** VBUS only exists on a board whose own USB is plugged in; with the
+  bank in the Pico W, the flight Pico's VBUS is dead and so is the latch. On
+  VSYS it works whichever board holds the bank. Put the 220 µF across VSYS and
+  GND near the servo: its inrush now sags the rail both boards and the Wi-Fi
+  radio share, and a brown-out drops the phone's connection mid-test. Some
+  power banks also switch off below ~100 mA of draw; if the rig dies after half
+  a minute of idle, that is the bank, not the firmware.
+
+**Never:**
+
+- **3V3_EN is an input, not a supply.** It is the enable pin of each Pico's
+  own 3.3 V regulator, pulled up to VSYS through 100 kΩ. It powers nothing.
+  Tie it to VSYS and nothing changes; tie it to GND — or to the other board
+  while that board is off — and that Pico switches its own 3.3 V rail off and
+  appears dead.
+- **Never feed one board's 3V3 into the other's VSYS.** If the second board is
+  also on USB, its VSYS sits near 4.7 V, and the wire pushes that into the
+  first board's 3.3 V rail — rated to 3.6 V, and shared with the RP2040 and
+  every sensor on the bus.
+- **Never power one board with the other off** when their UARTs are joined,
+  unless there is ~1 kΩ in series with each TX. A powered board's TX idles high
+  and back-feeds the unpowered one through its RX pin's protection diode.
+
+**Sources are selected, never substituted.** `/mode?m=uart` for the wire, or
+`bench` / `flight` / `still` for a synthetic profile; the viewer's selector
+shows whichever the station is actually running. In `uart` mode the synthetic
+model does not run at all — if it did, it would keep refreshing the freshness
+stamp and a dead wire would never go stale. `/health` reports the source and a
+`link` block — lines accepted, lines rejected, age of the last good line — in
+every mode, so you can check the wire while looking at a synthetic profile.
+
+### Commands from a phone
+
+`/cmd?c=<command>` relays a board command up the wire. The page's buttons use
+it; you can too, from a laptop on the network. What reaches the flight
+computer is **rebuilt from an allowlist**, never forwarded as typed:
+
+| Command | Does |
+|---|---|
+| `arm`, `safe` | permit / stop latch movement |
+| `fire`, `latch` | withdraw / re-engage the pin (armed only) |
+| `us <600-2400>` | drive to a raw pulse width (armed only) |
+| `pos <a> <b>` | set latched / released pulse widths |
+| `buz off\|chirp\|double\|locate\|alarm`, `beep <hz> <ms>` | buzzer |
+| `z`, `b`, `r`, `g` | re-zero baro, gyro bias, reset peaks, GPS status |
+| `srv`, `bz`, `hb` | servo status, buzzer status, heartbeat |
+
+Anything else — unknown words, extra arguments, out-of-range numbers, stray
+characters, a second command smuggled after an encoded newline — is refused
+with a `400` and a reason. **Every** board command is refused with a `409`
+while the source is synthetic.
+
+**A `200` means the station put it on the wire, not that the board did it.**
+The board's reply comes back as an `M,` line, which the station forwards to
+every phone's console as an SSE `msg` event.
+
+**Keep the latch armed by keeping the page open.** The board disarms after 3 s
+without a command, and heartbeats come from the page — so locking the phone or
+switching apps disarms it. That is the point.
+
+**Set a real Wi-Fi password.** Joining this network now means being able to arm
+the latch, and the default in `main.py` is public. Create `station_secret.py`
+on the board:
 
 ```python
-from machine import UART, Pin
-uart = UART(0, 115200, tx=Pin(0), rx=Pin(1))
-
-async def radio_reader():
-    buf = b""
-    while True:
-        if uart.any():
-            buf += uart.read()
-            while b"\n" in buf:
-                line, buf = buf.split(b"\n", 1)
-                line = line.strip()
-                if line.startswith(b"V,"):
-                    tel.set_line(line.decode())  # records freshness too
-        await asyncio.sleep(0.005)
+AP_PASSWORD = "something long"     # 8-63 characters
 ```
 
-Then swap `asyncio.create_task(sampler())` for
-`asyncio.create_task(radio_reader())` in `main()`.
+It is git-ignored. The station prints a warning at boot, and `/health` reports
+`default_password: true`, until it exists.
+
+**When the radio arrives, it will not be a UART.** An RFM95W is SPI. It needs a
+LoRa driver that decodes the 18-byte §6.2 packet, formats a `V,...` line, and
+hands it to `tel.accept_line()` — the same slot, different plumbing.
 
 **The staleness path is already in place** — use `tel.set_line()` rather than
 assigning `tel.latest`, and it works automatically. When the source stops

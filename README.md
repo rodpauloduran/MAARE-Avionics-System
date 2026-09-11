@@ -18,9 +18,22 @@ fix (§4.5). Below the charts, the deployment test panel shows the latch
 `FIRED` and refusing to fire again until it is re-latched, and the serial
 monitor shows the fire sequence as the board logged it.*
 
+<p align="center">
+<img src="docs/images/phone-attitude.jpg" width="31%" alt="The viewer on a phone, served by the ground station: board command buttons, the source selector reading Wired link (UART), status Live, and the 3D model">
+<img src="docs/images/phone-readouts.jpg" width="31%" alt="The viewer on a phone: readouts for attitude, accelerometer, barometer, high-g, GPS and link, strip charts, and the latch reading safe">
+<img src="docs/images/phone-deploy.jpg" width="31%" alt="The deployment panel on a phone, with the condition list, endpoints, buzzer buttons, and the serial monitor showing the board's own GPS messages">
+</p>
+
+*The same viewer on a phone, served by the ground station over its own Wi-Fi.
+Left: the board controls live, and the source selector reading `Wired link
+(UART)` — what the station is actually running, read from `/health`. Centre:
+live readouts at 23 Hz on the board's clock with zero bad lines, and the latch
+reading `safe` as the **board** reports it. Right: the deployment panel, with
+the console showing messages the flight computer sent down the wire.*
+
 ---
 
-## Status: v0.3 — work in progress
+## Status: v0.3.1 — work in progress
 
 Early. **All four I²C sensors are on the flight computer and confirmed
 working** and the ground segment works on synthetic data. Everything else in this repository is **design
@@ -35,7 +48,7 @@ intent, not built hardware.**
 | Bench diagnostics (`rocket_diagnostics/`) | Working on hardware, all four sensors |
 | Pico W ground station + viewer | Working — **synthetic telemetry only** |
 | MG90D servo latch | **Wired to GP6 and driven** — bench harness only, no flight deployment code |
-| RFM95W LoRa ×2 | Not connected — no radio link exists |
+| RFM95W LoRa ×2 | On the bench, not driven. A **wired UART downlink** stands in for the radio (v0.3.1) |
 | Latch mechanism, collar joint | Not built — the servo drives nothing yet |
 | Reed switch arming interlock | Not connected |
 | LS3040 buzzer | Not connected |
