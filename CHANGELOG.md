@@ -6,6 +6,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [Unreleased]
+
+### Docs
+
+- **Photographs refreshed for v0.3**, and a new `viewer-trajectory.png`. The
+  attitude screenshot now shows the deployment panel and serial monitor
+  expanded, with the board's own log of a fire; the boot output shows the buzzer
+  and servo latch announcing themselves silent and safe; the bench photos show
+  the MG90D, the LS3040 and an RFM95W breakout alongside the sensors.
+- **Captions rewritten to match**, because every one quoted figures from the
+  screenshot it replaced. `bench-stack-2` moved from the §4.1 address map to
+  the §8.1 latch section, since it now shows the servo and buzzer rather than
+  the sensors, and `bench-stack-1` took its place in §4.1.
+- **Release-note images pinned to their tags.** The v0.2.0 and v0.2.1 notes
+  embedded their screenshots from `main`, so refreshing the photos silently
+  changed what those older release pages showed — the v0.2.1 page would have
+  displayed a v0.3 interface. Each now points at the image as it was at its own
+  tag.
+
+---
+
 ## [0.3.0] — 2026-09-11
 
 ### Added

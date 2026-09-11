@@ -40,8 +40,8 @@ community core. That choice has consequences the design document treats in
 a zero-length-`endTransmission()` defect that affects every I²C probe.
 
 ![Diagnostics boot output showing the I²C scan, decoded sensor configuration
-registers, GPS dynamic model confirmation, gyro bias and ground pressure
-zeroing](docs/images/diagnostics-boot.png)
+registers, GPS dynamic model confirmation, the buzzer and servo latch reporting
+silent and safe, gyro bias and ground pressure zeroing](docs/images/diagnostics-boot.png)
 
 **What runs today:** [`rocket_diagnostics/`](rocket_diagnostics/), a
 bench sketch driving the MS5611, LSM6DSO, ADXL375 and SAM-M8Q. It reports
