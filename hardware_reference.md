@@ -17,6 +17,8 @@ Target: Raspberry Pi Pico (RP2040), **official Arduino Mbed OS RP2040 core**
 
 | Function | GPIO | Physical pin | Notes |
 |---|---|---|---|
+| UART0 TX | GP0 | 1 | Wired downlink to the ground station (v0.3.1), 460800 baud |
+| UART0 RX | GP1 | 2 | Wired uplink: framed `!` commands from the ground station |
 | I2C0 SDA | GP4 | 6 | All four sensors share this bus |
 | I2C0 SCL | GP5 | 7 | 400 kHz, short traces |
 | SPI0 MISO | GP16 | 21 | RFM95W |
@@ -33,7 +35,7 @@ Target: Raspberry Pi Pico (RP2040), **official Arduino Mbed OS RP2040 core**
 | VSYS (battery in) | — | 39 | 1.8–5.5 V, buck-boost handles LiPo range |
 | GND | — | 38 | Common ground with servo |
 
-**Free after this:** GP0–GP3, GP8–GP11, GP13, GP14, GP15, GP22, GP27, GP28.
+**Free after this:** GP2, GP3, GP8–GP11, GP13, GP14, GP15, GP22, GP27, GP28.
 Plenty of margin for a nichrome MOSFET, a second deployment channel, or an OLED.
 
 ---
@@ -393,6 +395,60 @@ A buzzer that blocks costs you samples.
 
 **A piezo on 3V3 is quiet.** Audible on a bench, not across a field. Drive it
 through an NPN or a MOSFET from a higher rail for recovery use.
+
+### Wired downlink (v0.3.1 — radio stand-in)
+
+![The flight stack and the Pico W ground station on separate breadboards,
+joined by four jumper wires, with a power bank in the foreground](docs/images/bench-wired-link-2.jpg)
+
+*The link up close: four jumpers from the flight stack to the Pico W — TX and
+RX crossed, ground, and VSYS. The RFM95W at the back of the flight stack is on
+the board but not driven.*
+
+`Serial1` on the flight Pico is UART0 on **GP0 (TX) / GP1 (RX)**, which is
+exactly what the ground station opens as `UART(0, tx=Pin(0), rx=Pin(1))`.
+
+| Flight Pico | | Pico W | |
+|---|---|---|---|
+| **GP0** — UART0 TX, pin 1 | → | **GP1** — UART0 RX, pin 2 | telemetry down |
+| **GP1** — UART0 RX, pin 2 | ← | **GP0** — UART0 TX, pin 1 | commands up — needed for phone control |
+| **GND**, pin 3 | — | **GND**, pin 3 | required — no shared ground, no signal reference |
+
+**Power: two setups work.**
+
+- **Each Pico on its own USB**, nothing else between them.
+- **One power bank, VSYS joined to VSYS** (pin 39 to pin 39) — the bench setup
+  in use. Safe: each board's Schottky diode-ORs onto the shared rail, even if
+  both are also on USB. It also satisfies the rule below automatically, since
+  both boards power up together. **But move the servo's V+ from VBUS to
+  VSYS.** VBUS only exists on a board whose own USB is plugged in; with the
+  bank in the Pico W, the flight Pico's VBUS is dead and so is the latch. On
+  VSYS it works whichever board holds the bank. Put the 220 µF across VSYS and
+  GND near the servo: its inrush now sags the rail both boards and the Wi-Fi
+  radio share, and a brown-out drops the phone's connection mid-test. Some
+  power banks also switch off below ~100 mA of draw; if the rig dies after half
+  a minute of idle, that is the bank, not the firmware.
+
+**Never:**
+
+- **3V3_EN is an input, not a supply.** It is the enable pin of each Pico's
+  own 3.3 V regulator, pulled up to VSYS through 100 kΩ. It powers nothing.
+  Tie it to VSYS and nothing changes; tie it to GND — or to the other board
+  while that board is off — and that Pico switches its own 3.3 V rail off and
+  appears dead.
+- **Never feed one board's 3V3 into the other's VSYS.** If the second board is
+  also on USB, its VSYS sits near 4.7 V, and the wire pushes that into the
+  first board's 3.3 V rail — rated to 3.6 V, and shared with the RP2040 and
+  every sensor on the bus.
+- **Never power one board with the other off** when their UARTs are joined,
+  unless there is ~1 kΩ in series with each TX. A powered board's TX idles high
+  and back-feeds the unpowered one through its RX pin's protection diode.
+
+**`Serial1.write()` blocks on this core.** It is `mbed::UnbufferedSerial`
+underneath, busy-waiting on `writeable()` once the 32-byte TX FIFO is full.
+Budget roughly (bytes − 32) × 10 / baud per write: a 100-byte line costs ~6 ms
+at 115200 and ~1.5 ms at 460800. Both ends here run 460800 — match them, or
+the station counts every line as bad and `/health` says so.
 
 ### RFM95W
 

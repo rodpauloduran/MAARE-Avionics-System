@@ -173,6 +173,139 @@ def check_producer(ns, clock):
     clock["t"] += 2000
     check(st.stale(), "telemetry silent for 2 s not reported stale")
     print("  staleness timer OK")
+
+    # ---- wired link (v0.3.1 radio stand-in) -------------------------------
+    good = frames[-1]                      # a real 18-field frame
+    lk = Telemetry()
+    check(lk.mode == "uart", "default source should be uart, got %s" % lk.mode)
+
+    # The synthetic model must be silent in uart mode -- if it ran, it would
+    # keep refreshing the freshness stamp and a dead wire would never go stale.
+    before = lk.latest
+    clock["t"] += 40
+    lk.tick(dt)
+    check(lk.latest == before, "synthetic model ran in uart mode")
+    clock["t"] += 2000
+    check(lk.stale(), "uart mode with no wire traffic not reported stale")
+
+    check(lk.accept_line(good.encode()), "valid frame rejected")
+    check(lk.latest == good, "valid frame not adopted in uart mode")
+    check(not lk.stale(), "fresh wire frame still reported stale")
+
+    # What a wire delivers that a clean producer never does.
+    bad_cases = [
+        (good[25:].encode(),                        "the tail of a line cut off mid-frame"),
+        (b"",                                       "an empty line"),
+        (b"\xff\xfe\x00garbage",                  "undecodable bytes"),
+        (b"V,1,2,3",                                "too few fields"),
+        (("V," + ",".join(["1"] * 60)).encode(),    "too many fields"),
+        (good.replace(",", ",x", 1).encode(),       "a non-numeric field"),
+        (b"  GPS: fix 3D   sats 9",                 "board text rather than telemetry"),
+    ]
+    for raw, what in bad_cases:
+        held = lk.latest
+        check(not lk.accept_line(raw), "wired link accepted " + what)
+        check(lk.latest == held, "wired link adopted " + what)
+    check(lk.link_bad == len(bad_cases),
+          "bad-line counter %d, expected %d" % (lk.link_bad, len(bad_cases)))
+
+    check(lk.accept_line((good + "\r").encode()), "CR-terminated frame rejected")
+
+    # Counted in every mode, adopted only in uart mode.
+    lk.set_mode("bench")
+    held = lk.latest
+    check(lk.accept_line(good.encode()), "valid frame rejected in bench mode")
+    check(lk.latest == held, "wire frame adopted while a synthetic source was selected")
+    check(lk.source() == "synthetic", "bench mode should report source synthetic")
+    # Line assembly across arbitrary read boundaries, as a real UART delivers.
+    st2 = Telemetry()
+    three = frames[100:103]
+    stream = (three[0][40:] + "\n" + "\n".join(three) + "\n").encode()
+    for k in range(0, len(stream), 7):          # 7-byte reads split every frame
+        st2.feed(stream[k:k + 7])
+    check(st2.link_ok == 3, "reassembled %d of 3 frames" % st2.link_ok)
+    check(st2.link_bad == 1, "the leading partial line was not counted bad")
+    check(st2.latest == three[2], "latest is not the last whole frame")
+    check(st2.link_buf == b"", "bytes left in the buffer after whole frames")
+
+    # A baud mismatch: a stream that never contains a newline.
+    st3 = Telemetry()
+    st3.feed(b"\x55" * 2000)
+    check(st3.link_bad >= 1 and len(st3.link_buf) <= 512,
+          "no-newline stream was not discarded and counted")
+    print("  wired link: uart by default, validates frames, reassembles split "
+          "reads, no synthetic fallback, stale when quiet")
+
+    # ---- uplink: what a phone may put on the wire -----------------------
+    up = Telemetry()                               # uart by default
+    for raw, want in [
+        ("!arm", "!arm"), ("arm", "!arm"), ("%21arm", "!arm"),
+        ("!us%201500", "!us 1500"), ("us+1500", "!us 1500"),
+        ("!pos 1000 2000", "!pos 1000 2000"),
+        ("!buz locate", "!buz locate"), ("!beep 4000 200", "!beep 4000 200"),
+        ("z", "!z"), ("!g", "!g"), ("!hb", "!hb"), ("!fire", "!fire"),
+    ]:
+        got, why = up.prepare_command(raw)
+        check(got == want, "command %r -> %r, expected %r (%s)"
+              % (raw, got, want, why))
+
+    for raw, what in [
+        ("v", "the USB-only presentation command v"),
+        ("c", "the USB-only presentation command c"),
+        ("h", "the USB-only presentation command h"),
+        ("!us 50", "a pulse width below the clamp"),
+        ("!us 9999", "a pulse width above the clamp"),
+        ("!pos 1000 3000", "an endpoint out of range"),
+        ("!arm now", "an extra argument"),
+        ("!arm%0a!fire", "a second command smuggled after a newline"),
+        ("!buz siren", "an unknown buzzer pattern"),
+        ("!beep 5 5", "a beep out of range"),
+        ("", "an empty command"),
+        ("!" + "a" * 60, "an over-long command"),
+        ("rm -rf", "an unknown word"),
+        ("!ARM", "a non-canonical spelling"),
+    ]:
+        got, why = up.prepare_command(raw)
+        check(got is None, "uplink accepted %s: %r -> %r" % (what, raw, got))
+
+    before = up.cmd_refused
+    up.set_mode("bench")
+    got, why = up.prepare_command("!arm")
+    check(got is None,
+          "a board command was accepted while the display showed synthetic data")
+    check(up.cmd_refused == before + 1, "the synthetic-mode refusal was not counted")
+    up.set_mode("uart")
+    print("  uplink: allowlist rebuilds commands, refuses %d malformed or "
+          "out-of-range forms, refuses all while synthetic" % 14)
+
+    # ---- board messages: forwarded, fanned out, capped ------------------
+    mm = Telemetry()
+    check(mm.accept_line(b"M,  SERVO ARMED - latch will respond to commands"),
+          "a message line was rejected")
+    check(mm.link_bad == 0, "a message line was counted as bad")
+    check(mm.msgs_since(0) == [(1, "  SERVO ARMED - latch will respond to commands")],
+          "the message was not recorded verbatim")
+    mm.accept_line(frames[5].encode())
+    check(len(mm.msgs_since(0)) == 1, "a telemetry frame was recorded as a message")
+
+    for k in range(3):
+        mm.accept_line(("M,msg %d" % k).encode())
+    late = [t for _, t in mm.msgs_since(1)]
+    check(late == ["msg 0", "msg 1", "msg 2"],
+          "a client resuming from seq 1 saw %r" % late)
+
+    mm.set_mode("bench")
+    held = mm.msg_seq
+    mm.accept_line(b"M,from a board that is not on screen")
+    check(mm.msg_seq == held,
+          "a board message was forwarded while the display was synthetic")
+    mm.set_mode("uart")
+
+    for k in range(ns["MSG_KEEP"] + 50):
+        mm.push_msg("x")
+    check(len(mm.msgs) <= ns["MSG_KEEP"], "the message log grew past its cap")
+    print("  messages: forwarded verbatim, fanned out once per client, "
+          "withheld while synthetic, capped")
     return frames
 
 
@@ -200,6 +333,7 @@ def check_viewers(frames, tmp):
     frames_path = os.path.join(tmp, "frames.txt")
     io.open(frames_path, "w", encoding="utf-8", newline="\n").write("\n".join(frames) + "\n")
     runner = os.path.join(HERE, "viewer_checks.js")
+    net_runner = os.path.join(HERE, "viewer_net_checks.js")
 
     for v in VIEWERS:
         js = os.path.join(tmp, "extract.js")
@@ -214,6 +348,21 @@ def check_viewers(frames, tmp):
             for ln in (r.stdout + r.stderr).strip().splitlines():
                 print("        " + ln)
             fails.append("viewer checks failed for " + name)
+
+        # The dual-transport build is also what the ground station serves to
+        # phones -- and over Wi-Fi it now sends commands to a real actuator.
+        # That path only exists when the page is loaded over HTTP, so it gets
+        # its own run.
+        if "NET_MODE" in io.open(v, encoding="utf-8").read():
+            r = subprocess.run(["node", net_runner, js],
+                               capture_output=True, text=True)
+            if r.returncode == 0:
+                print("  PASS  " + name + "  (as served to a phone)")
+            else:
+                print("  FAIL  " + name + "  (as served to a phone)")
+                for ln in (r.stdout + r.stderr).strip().splitlines():
+                    print("        " + ln)
+                fails.append("network-mode checks failed for " + name)
 
 
 def main():

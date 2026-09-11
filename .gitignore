@@ -39,3 +39,8 @@ build/
 # worth keeping.
 *.csv
 !docs/**/*.csv
+
+# --- Ground station secrets ---
+# The AP password, set on the board. The default in main.py is public; the real
+# one must never be committed, because joining the network can arm the latch.
+station_secret.py

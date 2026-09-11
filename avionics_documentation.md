@@ -1,6 +1,6 @@
 # Water Rocket Avionics System — Design Documentation
 
-**v0.3 · September 2026**
+**v0.3.1 · September 2026**
 Mapúa University (Intramuros)
 
 > **What is built.** All four I²C sensors are now on the flight computer — the
@@ -721,10 +721,126 @@ laptop that joins. No router, no internet, no app install — which is the point
 because a launch site has none of those.
 
 ```
-   Rocket ──LoRa──▶ [RFM95W] ──UART──▶ Pico W ──Wi-Fi AP──▶ phone browser
+   Rocket ──LoRa──▶ [RFM95W] ──SPI───▶ Pico W ──Wi-Fi AP──▶ phone browser
                                         │                     (viewer)
                                         └─ serves index.html + SSE stream
 ```
+
+> **Correction:** this diagram previously showed the RFM95W reaching the Pico W
+> over UART. An RFM95W is an SPI transceiver with no UART. The ground station's
+> radio producer will be a LoRa driver on SPI, decoding the §6.2 packet into a
+> §6.6 line — not a serial reader.
+
+![The v0.3.1 bench rig: the flight stack on one breadboard, the Pico W ground
+station on its own breadboard beside it, joined by four jumpers, with the servo
+and buzzer to one side and the whole rig on a power bank](docs/images/bench-wired-link-1.jpg)
+
+*The v0.3.1 bench rig. The flight stack on the left, the Pico W ground station
+on its own board at right, joined by four jumpers — TX and RX crossed, ground,
+and VSYS — and the whole rig running off a power bank. The Pico W has no USB of
+its own. There is no radio anywhere in this path.*
+
+**Wired downlink (v0.3.1) — a stand-in for the radio.** Until the antenna
+pigtails and connectors are on hand, the flight computer's UART0 is wired
+straight into the ground station's. It carries the §6.6 line, is read into the
+same producer slot the radio will use, and so exercises everything *downstream*
+of the receiver — staleness, SSE, the viewer — and nothing about the receiver:
+no loss, no range, no 868 MHz, no 18-byte packet.
+
+**It carries commands up as well — by deliberate choice.** The wire was built
+transmit-only first, precisely so that ground control of the latch could not
+arrive *by accident* inside a test rig. It was then asked for on purpose:
+arming, firing, zeroing and the rest from a phone. So a phone's command goes to
+the station's `/cmd`, is **rebuilt from an allowlist** — never forwarded as
+typed — and relayed up the wire, where the flight computer accepts **framed
+`!word` lines only**, never a bare byte. That last rule matters: an unplugged
+RX pin picks up noise, and a single noise byte that looked like `z` or `b` would
+re-zero the barometer or start a blocking gyro average from nobody.
+
+Three further rules. **Board commands are refused unless the wire is the
+selected source**, at the station and in the page: arming a real latch while the
+display shows synthetic data would put a fictional vehicle's latch state beside
+a real actuator. **The deadman still rules** — the phone must heartbeat like the
+USB viewer does, so locking the screen, switching apps or losing Wi-Fi stops the
+heartbeats and the board disarms itself within 3 s; that property is what makes
+a remote arming path tolerable at all. And **a `200` from `/cmd` means the
+station put the command on the wire, not that the board acted** — the board's
+own reply arrives in the phone's console, and the latch state in the next frame.
+
+The board's messages come back down the same wire as `M,` lines, which the
+station fans out to every connected phone as SSE `msg` events, replaying the
+recent ones to a phone that joins late.
+
+<p align="center">
+<img src="docs/images/phone-attitude.jpg" width="31%" alt="The viewer on a phone, served by the ground station: board command buttons, the source selector reading Wired link (UART), status Live, and the 3D model">
+<img src="docs/images/phone-readouts.jpg" width="31%" alt="The viewer on a phone: readouts for attitude, accelerometer, barometer, high-g, GPS and link, strip charts, and the latch reading safe">
+<img src="docs/images/phone-deploy.jpg" width="31%" alt="The deployment panel on a phone, with the condition list, endpoints, buzzer buttons, and the serial monitor showing the board's own GPS messages">
+</p>
+
+*The same viewer on a phone, served by the ground station over its own Wi-Fi.
+Left: the board controls live, and the source selector reading `Wired link
+(UART)` — what the station is actually running, read from `/health`. Centre:
+live readouts at 23 Hz on the board's clock with zero bad lines, and the latch
+reading `safe` as the **board** reports it. Right: the deployment panel, with
+the console showing messages the flight computer sent down the wire.*
+
+> **None of this carries over to flight.** The flight system arms by a reed
+> switch and a magnet, physically (§8.4), precisely so that nothing remote can
+> arm it — and deployment must never depend on a link (§2.3). Remote arming over
+> the radio would need its own design, if it is wanted at all. This is a bench
+> rig with a servo on a desk.
+
+The station selects its source **explicitly** — `uart` (the default) or a
+synthetic profile — and **never falls back** from the wire to synthetic data.
+Quietly substituting plausible fake motion for a dead link is the worst thing
+this display could do; instead the stream goes stale and the viewer dims.
+The viewer also no longer reads `Live` merely because the SSE connection
+opened: with nothing on the wire the station connects and forwards nothing,
+so `Live` waits for a real frame.
+
+| Flight Pico | | Pico W | |
+|---|---|---|---|
+| **GP0** — UART0 TX, pin 1 | → | **GP1** — UART0 RX, pin 2 | telemetry down |
+| **GP1** — UART0 RX, pin 2 | ← | **GP0** — UART0 TX, pin 1 | commands up — needed for phone control |
+| **GND**, pin 3 | — | **GND**, pin 3 | required — no shared ground, no signal reference |
+
+**Power: two setups work.**
+
+- **Each Pico on its own USB**, nothing else between them.
+- **One power bank, VSYS joined to VSYS** (pin 39 to pin 39) — the bench setup
+  in use. Safe: each board's Schottky diode-ORs onto the shared rail, even if
+  both are also on USB. It also satisfies the rule below automatically, since
+  both boards power up together. **But move the servo's V+ from VBUS to
+  VSYS.** VBUS only exists on a board whose own USB is plugged in; with the
+  bank in the Pico W, the flight Pico's VBUS is dead and so is the latch. On
+  VSYS it works whichever board holds the bank. Put the 220 µF across VSYS and
+  GND near the servo: its inrush now sags the rail both boards and the Wi-Fi
+  radio share, and a brown-out drops the phone's connection mid-test. Some
+  power banks also switch off below ~100 mA of draw; if the rig dies after half
+  a minute of idle, that is the bank, not the firmware.
+
+**Never:**
+
+- **3V3_EN is an input, not a supply.** It is the enable pin of each Pico's
+  own 3.3 V regulator, pulled up to VSYS through 100 kΩ. It powers nothing.
+  Tie it to VSYS and nothing changes; tie it to GND — or to the other board
+  while that board is off — and that Pico switches its own 3.3 V rail off and
+  appears dead.
+- **Never feed one board's 3V3 into the other's VSYS.** If the second board is
+  also on USB, its VSYS sits near 4.7 V, and the wire pushes that into the
+  first board's 3.3 V rail — rated to 3.6 V, and shared with the RP2040 and
+  every sensor on the bus.
+- **Never power one board with the other off** when their UARTs are joined,
+  unless there is ~1 kΩ in series with each TX. A powered board's TX idles high
+  and back-feeds the unpowered one through its RX pin's protection diode.
+
+**Why 460800 baud.** `Serial1.write()` on the Mbed core **blocks**: it goes
+through `mbed::UnbufferedSerial` and busy-waits on `writeable()`. The RP2040
+TX FIFO absorbs 32 bytes and every byte after that waits for the wire. A
+~100-byte line at 115200 would stall the flight loop about 6 ms per frame; at
+460800 it is about 1.5 ms. In the flight firmware's 500 Hz loop even that is
+too much, which is one more reason §10.2 puts telemetry in the normal-priority
+thread.
 
 **Why MicroPython and not Arduino here.** Pico W networking is far better
 supported, and the filesystem means the ~45 KB viewer is a file rather than a
@@ -937,12 +1053,12 @@ exists to make arrival jitter harmless, and the trajectory recorder uses it for
 exactly that reason.
 
 **Board command buttons.** `Zero baro`, `Gyro bias`, `Reset peaks` and
-`GPS status` send the sketch's single-character commands over the same port the
-telemetry arrives on. They are **serial-only, and this is a transport
-limitation, not an oversight**: SSE is one-way, so a page served by the ground
-station has no back-channel to the flight computer at all. The buttons are
-hidden in network mode. `c` (CSV) and `h` (reprint header) are deliberately not
-exposed — both would corrupt the stream the page is reading.
+`GPS status` — and the whole deployment panel — work over both transports.
+Over USB they go down the same port the telemetry arrives on; served by the
+ground station, they go through `/cmd` and up the wired link (§6.5), and are
+greyed out whenever the station's source is synthetic. `c` (CSV) and `h`
+(reprint header) are deliberately not exposed on either — both would corrupt
+the stream the page is reading — and the wire cannot carry them at all.
 
 Zeroing the barometer and re-measuring gyro bias block the sketch for a second
 or more while they average, so frames genuinely stop. The staleness indicator
@@ -1228,6 +1344,8 @@ Recovery is the reverse: **disarm first**, before touching the vehicle.
 
 | Function | GPIO | Pin | Notes |
 |---|---|---|---|
+| UART0 TX | GP0 | 1 | **Wired downlink to the ground station** (v0.3.1 radio stand-in), 460800 baud |
+| UART0 RX | GP1 | 2 | Wired uplink: framed `!` commands from the ground station, relayed from a phone |
 | I²C0 SDA | GP4 | 6 | All sensors |
 | I²C0 SCL | GP5 | 7 | 400 kHz |
 | SPI0 MISO | GP16 | 21 | RFM95W |
@@ -1244,9 +1362,10 @@ Recovery is the reverse: **disarm first**, before touching the vehicle.
 | VSYS (batt in) | — | 39 | 1.8–5.5 V |
 | GND | — | 38 | Common with servo |
 
-Free: GP0–GP3, GP8–GP11, GP13, GP14, GP15, GP22, GP27, GP28 — ample margin for
+Free: GP2, GP3, GP8–GP11, GP13, GP14, GP15, GP22, GP27, GP28 — ample margin for
 a nichrome backup channel, second deployment event, or an OLED. (GP15 and GP13
-are free again now the servo and buzzer sit on GP6 and GP7.)
+are free again now the servo and buzzer sit on GP6 and GP7; GP0 and GP1 carry
+the wired downlink until the radio replaces it.)
 
 ### 9.2 Toolchain
 
@@ -1645,6 +1764,9 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
       on hardware**, under both a raw bit-bang and the Servo library, on VBUS
 - [x] LS3040 buzzer on GP7 with non-blocking pattern playback, arming chirp and
       fire confirmation (§6.7)
+- [x] Wired UART downlink from the flight computer to the ground station, as a
+      stand-in for the radio: validated frames, explicit source selection, no
+      synthetic fallback (§6.5)
 - [x] Attitude viewer, with dual serial/Wi-Fi transport (§6.7)
 - [x] Pico W ground station, serving the viewer over its own Wi-Fi (§6.5)
 - [x] Telemetry wire format, shared across both transports (§6.6)
@@ -1677,9 +1799,10 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
       device. Four sets of pull-ups in parallel on breadboard leads is the
       prime suspect (§4.1)
 - [ ] Paired LoRa TX/RX test sketches with RSSI + packet-loss logging
-- [ ] **Wire the radio into the ground station** — replace the synthetic
-      producer task with a UART packet reader. Architecture already supports
-      it; no viewer changes needed (§6.5)
+- [ ] **Wire the radio into the ground station.** The producer slot is now
+      proven end to end by the wired downlink; what remains is a LoRa driver on
+      **SPI** (the RFM95W has no UART) that decodes the §6.2 packet into a §6.6
+      line and hands it to the same `accept_line()` (§6.5)
 - [ ] Build flight antenna (82 mm); source SMA edge-mount connector + 868 MHz
       whip for ground station
 - [ ] Extend LSM6DSO to flight ranges (±16 g, ±2000 dps) via register writes,
@@ -1696,8 +1819,11 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
       under 478 N
 - [ ] Latch fabrication and ×50 pull test
 - [ ] Re-verify NTC SRD circulars before first RF-active flight
-- [ ] Change the ground station Wi-Fi password before any public demonstration
-      — it is currently a default in plain text in the source
+- [ ] **Set the ground station's Wi-Fi password — this is no longer cosmetic.**
+      Joining the network now means being able to arm and fire the latch, and
+      the default is published in this repository. Put the real one in
+      `station_secret.py` on the board (git-ignored); the station warns at boot
+      and in `/health` while it is still on the default
 
 ---
 
@@ -1727,7 +1853,7 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 ---
 
-*v0.3 — September 2026. This document reflects design intent and analysis,
+*v0.3.1 — September 2026. This document reflects design intent and analysis,
 much of it first-order rather than validated. Numbers marked as estimates
 should be confirmed by test or FEA before they are relied upon for flight
 safety.*

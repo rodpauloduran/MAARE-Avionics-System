@@ -63,6 +63,14 @@
 //        A piezo at 3V3 is quiet but audible.  Drive it through an NPN or a
 //        MOSFET from a higher rail if it needs to be heard across a field.
 //
+//      WIRED DOWNLINK to the ground station Pico W  (radio stand-in)
+//        GP0 (TX, pin 1) -> Pico W GP1 (RX, pin 2)
+//        GND             -> Pico W GND     not optional: no shared ground,
+//                                          no signal reference, garbage
+//        GP1 (RX, pin 2) <- Pico W GP0     the uplink: phone commands arrive
+//                                          here, framed '!' lines only
+//        Power each Pico from its OWN USB.  No other wires between them.
+//
 //      MG90D servo latch
 //        signal -> GP6      (design doc 9.1 specified GP15; GP6 is as built)
 //        V+     -> its OWN supply, not the Pico's 3V3 rail
@@ -216,9 +224,6 @@ float noiseBuf[NOISE_N];
 int   noiseIdx  = 0;
 bool  noiseFull = false;
 
-char     cmdBuf[48];
-int      cmdLen    = 0;
-bool     cmdActive = false;
 
 bool     csvMode   = false;
 bool     vizMode   = false;
@@ -291,6 +296,90 @@ uint32_t gpsLastFixMs = 0;
 //    * Firing latches.  It will not fire twice without an explicit re-latch,
 //      mirroring the deployFired flag of 5.4.
 // =============================================================================
+// =============================================================================
+//  WIRED DOWNLINK  (Serial1: GP0 = TX, GP1 = RX)
+//
+//  A temporary stand-in for the LoRa pair while the antenna pigtails are not
+//  on hand: the same telemetry line, straight into the ground station's UART.
+//  It exercises everything downstream of the radio -- the ground station's
+//  producer, the SSE stream, staleness, the viewer -- and nothing about the
+//  radio itself: no loss, no range, no 868 MHz, no 18-byte packet (6.2).
+//
+//  WHY 460800 BAUD, not 115200.  Serial1.write() on this core BLOCKS: it goes
+//  through mbed::UnbufferedSerial and busy-waits on writeable().  The RP2040's
+//  TX FIFO absorbs the first 32 bytes, and every byte after that waits for the
+//  wire.  A telemetry line is ~100 bytes, so at 115200 the loop would stall
+//  ~6 ms of every 40 ms frame; at 460800 it is ~1.5 ms.  (In the flight
+//  firmware's 500 Hz loop even 1.5 ms is too much -- telemetry has to go out
+//  from the normal-priority thread, exactly as 10.2 already says.)
+// =============================================================================
+const bool     LINK_ENABLED = true;
+const uint32_t LINK_BAUD    = 460800;
+
+// -----------------------------------------------------------------------------
+//  THE UPLINK -- a deliberate decision, not an accident.
+//
+//  The wire was built transmit-only first, precisely so that ground control of
+//  the latch could not arrive by accident inside a test rig.  It was then
+//  asked for on purpose: arming, firing, zeroing and the rest from a phone,
+//  through the ground station.  So the wire carries commands up as well, and
+//  what arrives is constrained harder than the USB port is:
+//
+//    * FRAMED LINES ONLY.  From the wire, a bare byte means nothing.  Only
+//      '!word args' terminated by a newline is acted on.  An unplugged RX pin
+//      picks up noise, and a single noise byte that looked like 'z' or 'b'
+//      would re-zero the barometer or start a 1.5 s blocking gyro average --
+//      from nobody.  A noise burst spelling "!arm\n" is not a real risk.
+//    * NO PRESENTATION COMMANDS.  'v', 'c' and 'h' only change what the USB
+//      port prints; there is no '!' form of them, so the wire cannot send them.
+//    * THE DEADMAN STILL RULES.  The phone must heartbeat like the USB viewer
+//      does.  Lock the phone, background the tab, lose Wi-Fi: heartbeats stop,
+//      and 3 s later the board disarms itself.  That is the property that makes
+//      a remote arming path tolerable at all.
+//
+//  FOR FLIGHT, NONE OF THIS CARRIES OVER.  The flight system arms by a reed
+//  switch and a magnet, physically (8.4), precisely so that nothing remote can
+//  arm it; and deployment must never depend on a link (2.3).  This is a bench
+//  rig with a servo on a desk.
+// -----------------------------------------------------------------------------
+struct CmdPort {
+  char buf[48];
+  int  len;
+  bool active;
+  bool overflow;       // line too long: discard it rather than act on a prefix
+};
+CmdPort usbCmd  = { {0}, 0, false, false };
+CmdPort linkCmd = { {0}, 0, false, false };
+
+// -----------------------------------------------------------------------------
+//  Everything the board SAYS about its state goes to both the USB port and the
+//  wire; the 25 Hz table stays on USB.  On the wire each message line is
+//  prefixed "M," so the ground station can tell a message from a telemetry
+//  frame ("V,") without guessing, and forward it to the phone's console.
+// -----------------------------------------------------------------------------
+class LinkTee : public Print {
+  bool bol = true;                     // at the start of a line on the wire
+public:
+  using Print::write;
+  size_t write(uint8_t c) override {
+    Serial.write(c);
+    if (LINK_ENABLED) {
+      if (c == '\r') return 1;         // wire lines end in \n alone
+      if (bol && c == '\n') return 1;  // an empty message is not a message
+      if (bol) { Serial1.write('M'); Serial1.write(','); bol = false; }
+      Serial1.write(c);
+      if (c == '\n') bol = true;
+    }
+    return 1;
+  }
+  // Called before every telemetry frame: a message left unterminated would
+  // otherwise swallow the frame that follows it.
+  void endLine() {
+    if (LINK_ENABLED && !bol) { Serial1.write('\n'); bol = true; }
+  }
+};
+LinkTee Out;
+
 const int      SERVO_PIN    = 6;
 const uint16_t SERVO_MIN_US = 600;      // hard clamp; protects the gear train
 const uint16_t SERVO_MAX_US = 2400;
@@ -424,24 +513,24 @@ void applyImuConfig() {
     }
   }
 
-  Serial.print(F("  CTRL1_XL = 0x")); Serial.print(c1, HEX);
-  Serial.print(F("  ->  accel +/-")); Serial.print(ACC_RANGE_G);
-  Serial.print(F(" g,  ")); Serial.print(ACC_G_PER_LSB, 6);
-  Serial.println(F(" g/LSB"));
+  Out.print(F("  CTRL1_XL = 0x")); Out.print(c1, HEX);
+  Out.print(F("  ->  accel +/-")); Out.print(ACC_RANGE_G);
+  Out.print(F(" g,  ")); Out.print(ACC_G_PER_LSB, 6);
+  Out.println(F(" g/LSB"));
 
-  Serial.print(F("  CTRL2_G  = 0x")); Serial.print(c2, HEX);
-  Serial.print(F("  ->  gyro  +/-")); Serial.print(GYR_RANGE_DPS);
-  Serial.print(F(" dps, ")); Serial.print(GYR_DPS_PER_LSB, 5);
-  Serial.println(F(" dps/LSB"));
+  Out.print(F("  CTRL2_G  = 0x")); Out.print(c2, HEX);
+  Out.print(F("  ->  gyro  +/-")); Out.print(GYR_RANGE_DPS);
+  Out.print(F(" dps, ")); Out.print(GYR_DPS_PER_LSB, 5);
+  Out.println(F(" dps/LSB"));
 
   // Both registers are checked.  Warning on only one of them would let a
   // failed accelerometer write through in silence, which is the exact class
   // of fault this readback exists to catch.
   if (c1 != CFG_CTRL1_XL) {
-    Serial.println(F("  WARNING: CTRL1_XL did not take. Check I2C wiring."));
+    Out.println(F("  WARNING: CTRL1_XL did not take. Check I2C wiring."));
   }
   if (c2 != CFG_CTRL2_G) {
-    Serial.println(F("  WARNING: CTRL2_G did not take. Check I2C wiring."));
+    Out.println(F("  WARNING: CTRL2_G did not take. Check I2C wiring."));
   }
 }
 
@@ -470,23 +559,23 @@ bool startHighG() {
   uint8_t bw = hga.readRegister(ADXL3XX_REG_BW_RATE) & 0x0F;
   HG_RATE_HZ = (bw >= 8) ? (25 << (bw - 8)) : 0;
 
-  Serial.print(F("  BW_RATE  = 0x")); Serial.print(bw, HEX);
-  Serial.print(F("  ->  "));
+  Out.print(F("  BW_RATE  = 0x")); Out.print(bw, HEX);
+  Out.print(F("  ->  "));
   if (HG_RATE_HZ) {
-    Serial.print(HG_RATE_HZ);
-    Serial.println(F(" Hz output data rate"));
+    Out.print(HG_RATE_HZ);
+    Out.println(F(" Hz output data rate"));
   } else {
-    Serial.println(F("below 25 Hz - far too slow, did the write fail?"));
+    Out.println(F("below 25 Hz - far too slow, did the write fail?"));
   }
 
-  Serial.print(F("  range    = +/-"));
-  Serial.print(HG_RANGE_G, 0);
-  Serial.print(F(" g fixed in silicon, "));
-  Serial.print(HG_G_PER_LSB, 3);
-  Serial.println(F(" g/LSB (no range register to read back)"));
+  Out.print(F("  range    = +/-"));
+  Out.print(HG_RANGE_G, 0);
+  Out.print(F(" g fixed in silicon, "));
+  Out.print(HG_G_PER_LSB, 3);
+  Out.println(F(" g/LSB (no range register to read back)"));
 
   if (bw != ADXL343_DATARATE_800_HZ) {
-    Serial.println(F("  WARNING: data rate did not take. Check I2C wiring."));
+    Out.println(F("  WARNING: data rate did not take. Check I2C wiring."));
   }
   return true;
 }
@@ -518,23 +607,23 @@ bool startGps() {
   uint8_t dm   = gnss.getDynamicModel();
   uint8_t freq = gnss.getNavigationFrequency();
 
-  Serial.print(F("  dynamic model = "));
-  if (dm == DYN_MODEL_UNKNOWN)              Serial.println(F("query FAILED"));
-  else if (dm == DYN_MODEL_AIRBORNE1g)      Serial.println(F("airborne <1g   OK"));
-  else { Serial.print(dm); Serial.println(F("   <-- NOT airborne <1g")); }
+  Out.print(F("  dynamic model = "));
+  if (dm == DYN_MODEL_UNKNOWN)              Out.println(F("query FAILED"));
+  else if (dm == DYN_MODEL_AIRBORNE1g)      Out.println(F("airborne <1g   OK"));
+  else { Out.print(dm); Out.println(F("   <-- NOT airborne <1g")); }
 
-  Serial.print(F("  nav rate      = "));
-  Serial.print(freq);
-  Serial.println(F(" Hz"));
+  Out.print(F("  nav rate      = "));
+  Out.print(freq);
+  Out.println(F(" Hz"));
 
   if (dm != DYN_MODEL_AIRBORNE1g) {
-    Serial.println(F("  WARNING: a ground-vehicle model rejects rocket trajectories."));
+    Out.println(F("  WARNING: a ground-vehicle model rejects rocket trajectories."));
   }
 
   // A cold start with no almanac takes 30-60 s and needs a clear sky view.
   // "No fix" at boot on an indoor bench is expected, not a fault — say so, or
   // somebody spends an afternoon debugging a working receiver.
-  Serial.println(F("  no fix at boot is normal - cold start is 30-60 s, outdoors"));
+  Out.println(F("  no fix at boot is normal - cold start is 30-60 s, outdoors"));
   return true;
 }
 
@@ -556,60 +645,117 @@ void pollGps() {
 
 // Degrees * 1e7 as a decimal, without printf.  Seven decimal places is ~1 cm,
 // far finer than this receiver, but truncating here would be a silent loss.
-void printDegrees(int32_t e7) {
-  if (e7 < 0) { Serial.print('-'); e7 = -e7; }
-  Serial.print(e7 / 10000000L);
-  Serial.print('.');
+void printDegrees(Print &o, int32_t e7) {
+  if (e7 < 0) { o.print('-'); e7 = -e7; }
+  o.print(e7 / 10000000L);
+  o.print('.');
   long frac = e7 % 10000000L;
-  for (long d = 1000000L; d > 1; d /= 10) { if (frac < d) Serial.print('0'); }
-  Serial.print(frac);
+  for (long d = 1000000L; d > 1; d /= 10) { if (frac < d) o.print('0'); }
+  o.print(frac);
+}
+void printDegrees(int32_t e7) { printDegrees(Serial, e7); }
+
+// -----------------------------------------------------------------------------
+//  The telemetry line, written to any port.
+//
+//  One function, two destinations: the USB port when the viewer asks for it,
+//  and the wired downlink on Serial1 every tick regardless.  Writing it twice
+//  from one place is what guarantees the two can never drift apart -- the
+//  viewer must see byte-for-byte the same format whichever way it arrives.
+//
+//  Floats go through Print::print(float, digits), never printf("%f"), which
+//  this core may build without float support and fail silently (10.1).
+// -----------------------------------------------------------------------------
+void emitViz(Print &o, float ax, float ay, float az,
+                       float gx, float gy, float gz) {
+  o.print(F("V,"));
+  o.print(ax, 4);  o.print(',');
+  o.print(ay, 4);  o.print(',');
+  o.print(az, 4);  o.print(',');
+  o.print(gx, 2);  o.print(',');
+  o.print(gy, 2);  o.print(',');
+  o.print(gz, 2);  o.print(',');
+  o.print(alt, 3); o.print(',');
+  o.print(vel, 3); o.print(',');
+  o.print(millis());
+
+  // -1 marks "not fitted" for both parts.  Zero would be ambiguous: 0.00 g
+  // is a legal high-g reading in freefall, fix type 0 is a legal "no fix",
+  // and 0,0 is a real position in the Gulf of Guinea.
+  o.print(',');
+  if (hgPresent) o.print(hgMag, 2); else o.print(-1);
+
+  o.print(',');
+  if (!gpsPresent) {
+    o.print(F("-1,0,0,0,-1"));
+  } else {
+    o.print(gpsFixType); o.print(',');
+    o.print(gpsSats);    o.print(',');
+    if (gpsFixType >= 2) {
+      printDegrees(o, gpsLat); o.print(',');
+      printDegrees(o, gpsLon); o.print(',');
+      o.print(gpsHAccMm / 1000.0, 2);
+    } else {
+      o.print(F("0,0,-1"));
+    }
+  }
+
+  // Servo state, so the viewer displays the BOARD's belief rather than its
+  // own.  If the two ever disagree about whether the latch is armed, that
+  // disagreement is the thing you most need to see.
+  o.print(',');
+  o.print(servoFired ? 2 : (servoArmed ? 1 : 0));
+  o.print(',');
+  o.print(servoNowUs);
+
+  o.println();
 }
 
 void printGpsStatus() {
-  Serial.print(F("  GPS: "));
-  if (!gpsPresent) { Serial.println(F("not fitted")); return; }
+  Out.print(F("  GPS: "));
+  if (!gpsPresent) { Out.println(F("not fitted")); return; }
 
-  Serial.print(F("fix "));
+  Out.print(F("fix "));
   switch (gpsFixType) {
-    case 0:  Serial.print(F("none"));           break;
-    case 1:  Serial.print(F("dead-reckoning")); break;
-    case 2:  Serial.print(F("2D"));             break;
-    case 3:  Serial.print(F("3D"));             break;
-    case 4:  Serial.print(F("GNSS+DR"));        break;
-    case 5:  Serial.print(F("time-only"));      break;
-    default: Serial.print(gpsFixType);          break;
+    case 0:  Out.print(F("none"));           break;
+    case 1:  Out.print(F("dead-reckoning")); break;
+    case 2:  Out.print(F("2D"));             break;
+    case 3:  Out.print(F("3D"));             break;
+    case 4:  Out.print(F("GNSS+DR"));        break;
+    case 5:  Out.print(F("time-only"));      break;
+    default: Out.print(gpsFixType);          break;
   }
-  Serial.print(F("   sats "));
-  Serial.print(gpsSats);
+  Out.print(F("   sats "));
+  Out.print(gpsSats);
 
   if (gpsFixType >= 2) {
-    Serial.print(F("   "));
-    printDegrees(gpsLat);
-    Serial.print(F(", "));
-    printDegrees(gpsLon);
-    Serial.print(F("   MSL "));
-    Serial.print(gpsAltMslMm / 1000.0, 1);
-    Serial.print(F(" m"));
+    Out.print(F("   "));
+    printDegrees(Out, gpsLat);
+    Out.print(F(", "));
+    printDegrees(Out, gpsLon);
+    Out.print(F("   MSL "));
+    Out.print(gpsAltMslMm / 1000.0, 1);
+    Out.print(F(" m"));
 
     // The number that tells you whether to believe the two above it.
-    Serial.print(F("   +/-"));
-    Serial.print(gpsHAccMm / 1000.0, 1);
-    Serial.print(F(" m"));
+    Out.print(F("   +/-"));
+    Out.print(gpsHAccMm / 1000.0, 1);
+    Out.print(F(" m"));
     if (gpsSats < 6) {
-      Serial.print(F("   <-- only "));
-      Serial.print(gpsSats);
-      Serial.print(F(" sats, geometry is poor"));
+      Out.print(F("   <-- only "));
+      Out.print(gpsSats);
+      Out.print(F(" sats, geometry is poor"));
     }
   } else if (gpsEverFixed) {
     // Distinguishing "never had a fix" from "had one and lost it" is the
     // difference between a sky-view problem and an antenna or power problem.
-    Serial.print(F("   lock LOST "));
-    Serial.print((millis() - gpsLastFixMs) / 1000);
-    Serial.print(F(" s ago"));
+    Out.print(F("   lock LOST "));
+    Out.print((millis() - gpsLastFixMs) / 1000);
+    Out.print(F(" s ago"));
   } else {
-    Serial.print(F("   acquiring - needs sky view"));
+    Out.print(F("   acquiring - needs sky view"));
   }
-  Serial.println();
+  Out.println();
 }
 
 // -----------------------------------------------------------------------------
@@ -662,12 +808,12 @@ void buzzerService() {
 }
 
 void printBuzzerStatus() {
-  Serial.print(F("  BUZZER: pattern "));
-  Serial.print(buzName);
-  Serial.print(F("   pin GP")); Serial.print(BUZZER_PIN);
-  Serial.print(F("   "));
-  Serial.print(BUZ_HZ);
-  Serial.println(F(" Hz"));
+  Out.print(F("  BUZZER: pattern "));
+  Out.print(buzName);
+  Out.print(F("   pin GP")); Out.print(BUZZER_PIN);
+  Out.print(F("   "));
+  Out.print(BUZ_HZ);
+  Out.println(F(" Hz"));
 }
 
 // -----------------------------------------------------------------------------
@@ -726,22 +872,22 @@ void servoService() {
     servoDetachAtMs = 0;
     servoNowUs = 0;
     if (latch.attached()) latch.detach();
-    Serial.println(F("  SERVO pulse train stopped - move complete"));
+    Out.println(F("  SERVO pulse train stopped - move complete"));
   }
 }
 
 void printServoStatus() {
-  Serial.print(F("  SERVO: "));
-  Serial.print(servoArmed ? F("ARMED") : F("safe"));
-  if (servoFired) Serial.print(F(" (FIRED)"));
-  Serial.print(F("   pin GP")); Serial.print(SERVO_PIN);
-  Serial.print(F("   commanded "));
-  if (servoNowUs) { Serial.print(servoNowUs); Serial.print(F(" us")); }
-  else            Serial.print(F("idle - not driven"));
-  Serial.print(F("   latched=")); Serial.print(servoLatchedUs);
-  Serial.print(F(" released=")); Serial.print(servoReleasedUs);
-  Serial.println(F(" us"));
-  Serial.println(F("  (commanded, NOT measured - a servo has no feedback path)"));
+  Out.print(F("  SERVO: "));
+  Out.print(servoArmed ? F("ARMED") : F("safe"));
+  if (servoFired) Out.print(F(" (FIRED)"));
+  Out.print(F("   pin GP")); Out.print(SERVO_PIN);
+  Out.print(F("   commanded "));
+  if (servoNowUs) { Out.print(servoNowUs); Out.print(F(" us")); }
+  else            Out.print(F("idle - not driven"));
+  Out.print(F("   latched=")); Out.print(servoLatchedUs);
+  Out.print(F(" released=")); Out.print(servoReleasedUs);
+  Out.println(F(" us"));
+  Out.println(F("  (commanded, NOT measured - a servo has no feedback path)"));
 }
 
 void servoArm(bool on) {
@@ -754,34 +900,34 @@ void servoArm(bool on) {
     // of preparing to test would be the test.
     servoAttach();
     buzzerPlay(BUZ_CHIRP, 2, false, "chirp");   // 8.5: the arming chirp
-    Serial.println(F("  SERVO ARMED - latch will respond to commands"));
+    Out.println(F("  SERVO ARMED - latch will respond to commands"));
   } else {
     servoRelease();
     if (servoDetachAtMs) {
-      Serial.print(F("  SERVO SAFE - no new commands; finishing move, pulse stops in "));
-      Serial.print((long)(servoDetachAtMs - millis()));
-      Serial.println(F(" ms"));
+      Out.print(F("  SERVO SAFE - no new commands; finishing move, pulse stops in "));
+      Out.print((long)(servoDetachAtMs - millis()));
+      Out.println(F(" ms"));
     } else {
-      Serial.println(F("  SERVO SAFE - pin no longer driven"));
+      Out.println(F("  SERVO SAFE - pin no longer driven"));
     }
   }
 }
 
 bool servoFire() {
-  if (!servoArmed) { Serial.println(F("  SERVO refused: not armed")); return false; }
-  if (servoFired)  { Serial.println(F("  SERVO refused: already fired, re-latch first")); return false; }
+  if (!servoArmed) { Out.println(F("  SERVO refused: not armed")); return false; }
+  if (servoFired)  { Out.println(F("  SERVO refused: already fired, re-latch first")); return false; }
   servoWrite(servoReleasedUs);
   servoFired = true;
   buzzerPlay(BUZ_DOUBLE, 4, false, "double");   // audible confirmation of a fire
-  Serial.print(F("  SERVO FIRED -> ")); Serial.print(servoNowUs); Serial.println(F(" us"));
+  Out.print(F("  SERVO FIRED -> ")); Out.print(servoNowUs); Out.println(F(" us"));
   return true;
 }
 
 void servoRelatch() {
-  if (!servoArmed) { Serial.println(F("  SERVO refused: not armed")); return; }
+  if (!servoArmed) { Out.println(F("  SERVO refused: not armed")); return; }
   servoWrite(servoLatchedUs);
   servoFired = false;
-  Serial.print(F("  SERVO re-latched -> ")); Serial.print(servoNowUs); Serial.println(F(" us"));
+  Out.print(F("  SERVO re-latched -> ")); Out.print(servoNowUs); Out.println(F(" us"));
 }
 
 // -----------------------------------------------------------------------------
@@ -791,8 +937,25 @@ void servoRelatch() {
 //  two schemes visibly separate means the old commands cannot be broken by a
 //  parser change, and a truncated line can never be mistaken for one of them.
 // -----------------------------------------------------------------------------
+void zeroGround();
+void calibrateGyro();
+void printGpsStatus();
+
+void resetPeaks() {
+  altPeak = alt; gPeak = 0; gyroPeak = 0; hgPeak = 0;
+  accClip = false; gyrClip = false; hgClip = false;
+  Out.println(F("-- peaks reset --"));
+}
+
 void handleLineCommand(char *cmd) {
   servoLastCmdMs = millis();            // any command at all is a sign of life
+
+  // The single-character commands, in framed form -- so the wire can reach
+  // them without the wire ever acting on a bare byte.
+  if      (!strcmp(cmd, "z")) { zeroGround();     return; }
+  else if (!strcmp(cmd, "b")) { calibrateGyro();  return; }
+  else if (!strcmp(cmd, "r")) { resetPeaks();     return; }
+  else if (!strcmp(cmd, "g")) { printGpsStatus(); return; }
 
   if      (!strcmp(cmd, "arm"))   servoArm(true);
   else if (!strcmp(cmd, "safe"))  servoArm(false);
@@ -807,40 +970,67 @@ void handleLineCommand(char *cmd) {
     else if (!strcmp(w, "double")) buzzerPlay(BUZ_DOUBLE, 4, false, "double");
     else if (!strcmp(w, "locate")) buzzerPlay(BUZ_LOCATE, 2, true,  "locate");
     else if (!strcmp(w, "alarm"))  buzzerPlay(BUZ_ALARM,  2, true,  "alarm");
-    else { Serial.print(F("  !buz: unknown pattern ")); Serial.println(w); return; }
+    else { Out.print(F("  !buz: unknown pattern ")); Out.println(w); return; }
     printBuzzerStatus();
   }
   else if (!strncmp(cmd, "beep ", 5)) {
     char *sp = strchr(cmd + 5, ' ');
     uint16_t hz = (uint16_t)atoi(cmd + 5);
     uint16_t ms = sp ? (uint16_t)atoi(sp + 1) : 120;
-    if (hz < 100 || hz > 20000) { Serial.println(F("  !beep: 100-20000 Hz")); return; }
+    if (hz < 100 || hz > 20000) { Out.println(F("  !beep: 100-20000 Hz")); return; }
     static uint16_t oneShot[4];
     oneShot[0] = hz; oneShot[1] = ms; oneShot[2] = 0; oneShot[3] = 0;
     buzzerPlay(oneShot, 2, false, "beep");
-    Serial.print(F("  BUZZER beep ")); Serial.print(hz);
-    Serial.print(F(" Hz for ")); Serial.print(ms); Serial.println(F(" ms"));
+    Out.print(F("  BUZZER beep ")); Out.print(hz);
+    Out.print(F(" Hz for ")); Out.print(ms); Out.println(F(" ms"));
   }
   else if (!strcmp(cmd, "hb"))    { /* heartbeat: the timestamp above is it */ }
   else if (!strncmp(cmd, "us ", 3)) {
-    if (!servoArmed) { Serial.println(F("  SERVO refused: not armed")); return; }
+    if (!servoArmed) { Out.println(F("  SERVO refused: not armed")); return; }
     servoWrite((uint16_t)atoi(cmd + 3));
-    Serial.print(F("  SERVO -> ")); Serial.print(servoNowUs); Serial.println(F(" us"));
+    Out.print(F("  SERVO -> ")); Out.print(servoNowUs); Out.println(F(" us"));
   }
   else if (!strncmp(cmd, "pos ", 4)) {
     char *sp = strchr(cmd + 4, ' ');
-    if (!sp) { Serial.println(F("  !pos needs two values: !pos <latched_us> <released_us>")); return; }
+    if (!sp) { Out.println(F("  !pos needs two values: !pos <latched_us> <released_us>")); return; }
     *sp = 0;
     uint16_t a = (uint16_t)atoi(cmd + 4), b = (uint16_t)atoi(sp + 1);
     if (a < SERVO_MIN_US || a > SERVO_MAX_US || b < SERVO_MIN_US || b > SERVO_MAX_US) {
-      Serial.println(F("  !pos refused: outside the 600-2400 us clamp"));
+      Out.println(F("  !pos refused: outside the 600-2400 us clamp"));
       return;
     }
     servoLatchedUs = a; servoReleasedUs = b;
-    Serial.print(F("  SERVO endpoints: latched ")); Serial.print(a);
-    Serial.print(F(" us, released ")); Serial.print(b); Serial.println(F(" us"));
+    Out.print(F("  SERVO endpoints: latched ")); Out.print(a);
+    Out.print(F(" us, released ")); Out.print(b); Out.println(F(" us"));
   }
-  else { Serial.print(F("  !? unknown command: ")); Serial.println(cmd); }
+  else { Out.print(F("  !? unknown command: ")); Out.println(cmd); }
+}
+
+// -----------------------------------------------------------------------------
+//  Feed one byte from a port.  Returns true when the byte belonged to a framed
+//  '!' line; false means it was a bare byte and the CALLER decides what, if
+//  anything, a bare byte means on that port.
+// -----------------------------------------------------------------------------
+bool cmdFeed(CmdPort &p, char c) {
+  if (p.active) {
+    if (c == '\n' || c == '\r') {
+      p.buf[p.len] = 0;
+      p.active = false;
+      if (p.overflow) {
+        Out.println(F("  !? command too long - discarded, not truncated"));
+      } else if (p.len) {
+        handleLineCommand(p.buf);
+      }
+      p.len = 0; p.overflow = false;
+    } else if (p.len < (int)sizeof(p.buf) - 1) {
+      p.buf[p.len++] = c;
+    } else {
+      p.overflow = true;                // acting on a prefix of a longer
+    }                                   // command could mean a different one
+    return true;
+  }
+  if (c == '!') { p.active = true; p.len = 0; p.overflow = false; return true; }
+  return false;
 }
 
 // -----------------------------------------------------------------------------
@@ -849,12 +1039,12 @@ void handleLineCommand(char *cmd) {
 //  is no reliable gravity vector to correct against.  Board must be still.
 // -----------------------------------------------------------------------------
 void calibrateGyro() {
-  Serial.print(F("Measuring gyro bias - hold still"));
+  Out.print(F("Measuring gyro bias - hold still"));
   double sx = 0, sy = 0, sz = 0;
   for (int i = 0; i < BIAS_N; i++) {
     imu.read();
     sx += imu.g.x; sy += imu.g.y; sz += imu.g.z;
-    if (i % 50 == 0) Serial.print('.');
+    if (i % 50 == 0) Out.print('.');
     // 6 ms, not 4.  The gyro runs at 208 Hz, a 4.8 ms period, so a 4 ms delay
     // re-reads the same sample often enough to weight the average toward
     // whichever readings happen to be duplicated.  Sampling slower than the
@@ -865,10 +1055,10 @@ void calibrateGyro() {
   gyroBiasY = sy / BIAS_N;
   gyroBiasZ = sz / BIAS_N;
 
-  Serial.print(F(" done.  offset = "));
-  Serial.print(gyroBiasX * GYR_DPS_PER_LSB, 2); Serial.print(F(" / "));
-  Serial.print(gyroBiasY * GYR_DPS_PER_LSB, 2); Serial.print(F(" / "));
-  Serial.print(gyroBiasZ * GYR_DPS_PER_LSB, 2); Serial.println(F(" dps"));
+  Out.print(F(" done.  offset = "));
+  Out.print(gyroBiasX * GYR_DPS_PER_LSB, 2); Out.print(F(" / "));
+  Out.print(gyroBiasY * GYR_DPS_PER_LSB, 2); Out.print(F(" / "));
+  Out.print(gyroBiasZ * GYR_DPS_PER_LSB, 2); Out.println(F(" dps"));
 }
 
 // Height above the launch pad.  Always a delta from a pad reading — never
@@ -878,12 +1068,12 @@ float altitudeFrom(float hpa) {
 }
 
 void zeroGround() {
-  Serial.print(F("Zeroing ground pressure"));
+  Out.print(F("Zeroing ground pressure"));
   double sum = 0;
   for (int i = 0; i < 40; i++) {
     baro.read();
     sum += baro.getPressure();
-    if (i % 10 == 0) Serial.print('.');
+    if (i % 10 == 0) Out.print('.');
     delay(20);
   }
   groundHpa = sum / 40.0;
@@ -891,9 +1081,9 @@ void zeroGround() {
   altPeak = 0.0;
   noiseIdx = 0;
   noiseFull = false;
-  Serial.print(F(" done. Ground = "));
-  Serial.print(groundHpa, 2);
-  Serial.println(F(" hPa"));
+  Out.print(F(" done. Ground = "));
+  Out.print(groundHpa, 2);
+  Out.println(F(" hPa"));
 }
 
 // 1-sigma spread of recent altitude readings.  The single most useful number
@@ -928,9 +1118,16 @@ void setup() {
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 4000) { }
 
-  Serial.println();
-  Serial.println(F("=== ROCKET AVIONICS BENCH DIAGNOSTICS ==="));
-  Serial.println();
+  if (LINK_ENABLED) Serial1.begin(LINK_BAUD);
+
+  Out.println();
+  Out.println(F("=== ROCKET AVIONICS BENCH DIAGNOSTICS ==="));
+  if (LINK_ENABLED) {
+    Out.print(F("Wired link on GP0/GP1 at "));
+    Out.print(LINK_BAUD);
+    Out.println(F(" baud - telemetry down, framed commands up"));
+  }
+  Out.println();
 
   Wire.begin();
 
@@ -944,92 +1141,92 @@ void setup() {
   //      harmless ADC-read command, on the ADXL375 register 0 is the
   //      read-only device ID, and on the u-blox it only moves the DDC address
   //      pointer.  Check again if a sixth device joins the bus. ------------
-  Serial.println(F("I2C scan:"));
+  Out.println(F("I2C scan:"));
   int found = 0;
   for (byte a = 1; a < 127; a++) {
     Wire.beginTransmission(a);
     Wire.write(0);
     if (Wire.endTransmission() == 0) {
-      Serial.print(F("  0x"));
-      if (a < 16) Serial.print('0');
-      Serial.print(a, HEX);
-      Serial.print(F("  "));
-      if      (a == 0x76 || a == 0x77) Serial.println(F("MS5611 barometer"));
-      else if (a == 0x6A || a == 0x6B) Serial.println(F("LSM6 accel + gyro"));
-      else if (a == 0x1C || a == 0x1E) Serial.println(F("LIS3MDL magnetometer"));
-      else if (a == 0x53 || a == 0x1D) Serial.println(F("ADXL375 high-g"));
-      else if (a == 0x42)              Serial.println(F("u-blox GPS"));
-      else                             Serial.println(F("(unknown)"));
+      Out.print(F("  0x"));
+      if (a < 16) Out.print('0');
+      Out.print(a, HEX);
+      Out.print(F("  "));
+      if      (a == 0x76 || a == 0x77) Out.println(F("MS5611 barometer"));
+      else if (a == 0x6A || a == 0x6B) Out.println(F("LSM6 accel + gyro"));
+      else if (a == 0x1C || a == 0x1E) Out.println(F("LIS3MDL magnetometer"));
+      else if (a == 0x53 || a == 0x1D) Out.println(F("ADXL375 high-g"));
+      else if (a == 0x42)              Out.println(F("u-blox GPS"));
+      else                             Out.println(F("(unknown)"));
       found++;
     }
   }
-  if (found == 0) Serial.println(F("  nothing found - check wiring and power"));
-  Serial.println();
+  if (found == 0) Out.println(F("  nothing found - check wiring and power"));
+  Out.println();
 
   // ---- barometer.  reset() loads the calibration constants and skips the
   //      isConnected() check, whose Mbed workaround is gated behind an
   //      nRF52840-only macro and so never compiles in on RP2040. -----------
   if (baro.reset()) {
-    Serial.print(F("MS5611 found at 0x"));
-    Serial.println(baro.getAddress(), HEX);
+    Out.print(F("MS5611 found at 0x"));
+    Out.println(baro.getAddress(), HEX);
   } else {
-    Serial.println(F("MS5611 NOT found."));
-    Serial.println(F("  - PS pin must be HIGH for I2C mode"));
-    Serial.println(F("  - CSB to GND = 0x77, CSB to VCC = 0x76"));
+    Out.println(F("MS5611 NOT found."));
+    Out.println(F("  - PS pin must be HIGH for I2C mode"));
+    Out.println(F("  - CSB to GND = 0x77, CSB to VCC = 0x76"));
     while (1) delay(1000);
   }
 
   // ---- IMU ---------------------------------------------------------------
   if (imu.init()) {
-    Serial.println(F("LSM6 found and initialised"));
+    Out.println(F("LSM6 found and initialised"));
     applyImuConfig();
   } else {
-    Serial.println(F("LSM6 NOT found - check wiring (Pololu board is 0x6B)"));
+    Out.println(F("LSM6 NOT found - check wiring (Pololu board is 0x6B)"));
     while (1) delay(1000);
   }
 
   // ---- high-g accelerometer.  Not fatal: the column degrades to dashes. ---
-  Serial.println();
+  Out.println();
   if (startHighG()) {
-    Serial.println(F("ADXL375 found and initialised"));
+    Out.println(F("ADXL375 found and initialised"));
     hgPresent = true;
   } else {
-    Serial.println(F("ADXL375 NOT found - the hg column will read ---"));
-    Serial.println(F("  - address jumper open = 0x53, bridged = 0x1D"));
+    Out.println(F("ADXL375 NOT found - the hg column will read ---"));
+    Out.println(F("  - address jumper open = 0x53, bridged = 0x1D"));
   }
 
   // ---- GPS.  Not fatal either. -------------------------------------------
-  Serial.println();
+  Out.println();
   if (startGps()) {
-    Serial.println(F("SAM-M8Q found and configured"));
+    Out.println(F("SAM-M8Q found and configured"));
     gpsPresent = true;
   } else {
-    Serial.println(F("SAM-M8Q NOT found - GPS lines will read 'not fitted'"));
-    Serial.println(F("  - u-blox DDC is 0x42; give it a moment after power-up"));
+    Out.println(F("SAM-M8Q NOT found - GPS lines will read 'not fitted'"));
+    Out.println(F("  - u-blox DDC is 0x42; give it a moment after power-up"));
   }
 
   // ---- servo latch.  Deliberately NOT attached here: an unattached pin
   //      emits no pulse train, so nothing is commanded until somebody arms
   //      the latch on purpose. -------------------------------------------
-  Serial.println();
+  Out.println();
   buzPin = new mbed::DigitalOut(digitalPinToPinName(BUZZER_PIN));
   *buzPin = 0;
-  Serial.print(F("Buzzer on GP")); Serial.print(BUZZER_PIN);
-  Serial.print(F(" - silent at boot, ")); Serial.print(BUZ_HZ);
-  Serial.println(F(" Hz"));
+  Out.print(F("Buzzer on GP")); Out.print(BUZZER_PIN);
+  Out.print(F(" - silent at boot, ")); Out.print(BUZ_HZ);
+  Out.println(F(" Hz"));
 
-  Serial.print(F("Servo latch on GP")); Serial.print(SERVO_PIN);
-  Serial.println(F(" - SAFE at boot, no pulses emitted"));
-  Serial.println(F("  arm it with !arm before anything will move"));
+  Out.print(F("Servo latch on GP")); Out.print(SERVO_PIN);
+  Out.println(F(" - SAFE at boot, no pulses emitted"));
+  Out.println(F("  arm it with !arm before anything will move"));
 
-  Serial.println();
+  Out.println();
   calibrateGyro();
-  Serial.println();
+  Out.println();
   zeroGround();
 
-  Serial.println();
-  Serial.println(F("Commands:  z = re-zero   b = gyro bias   r = reset peaks"));
-  Serial.println(F("           c = CSV       v = viz stream  g = GPS   h = header"));
+  Out.println();
+  Out.println(F("Commands:  z = re-zero   b = gyro bias   r = reset peaks"));
+  Out.println(F("           c = CSV       v = viz stream  g = GPS   h = header"));
   printHeader();
 
   nextTime    = millis();
@@ -1047,18 +1244,7 @@ void loop() {
 
     // A '!' opens a buffered line command; everything up to the newline is
     // collected rather than dispatched character by character.
-    if (cmdActive) {
-      if (c == '\n' || c == '\r') {
-        cmdBuf[cmdLen] = 0;
-        cmdActive = false;
-        if (cmdLen) handleLineCommand(cmdBuf);
-        cmdLen = 0;
-      } else if (cmdLen < (int)sizeof(cmdBuf) - 1) {
-        cmdBuf[cmdLen++] = c;
-      }
-      continue;
-    }
-    if (c == '!') { cmdActive = true; cmdLen = 0; continue; }
+    if (cmdFeed(usbCmd, c)) continue;
     // The header is for the human-readable table only.  Reprinting it while
     // the viewer is streaming injects non-telemetry lines into the feed the
     // viewer is parsing -- harmless, since it ignores anything that is not a
@@ -1067,11 +1253,7 @@ void loop() {
     // is useful feedback that the command was received.
     if (c == 'z' || c == 'Z') { Serial.println(); zeroGround(); if (!vizMode) printHeader(); }
     else if (c == 'b' || c == 'B') { Serial.println(); calibrateGyro(); if (!vizMode) printHeader(); }
-    else if (c == 'r' || c == 'R') {
-      altPeak = alt; gPeak = 0; gyroPeak = 0; hgPeak = 0;
-      accClip = false; gyrClip = false; hgClip = false;
-      Serial.println(F("-- peaks reset --"));
-    }
+    else if (c == 'r' || c == 'R') resetPeaks();
     else if (c == 'c' || c == 'C') {
       csvMode = !csvMode;
       Serial.println();
@@ -1087,6 +1269,12 @@ void loop() {
     else if (c == 'h' || c == 'H') printHeader();
   }
 
+  // The wire from the ground station.  Framed lines only: cmdFeed's return
+  // value is deliberately ignored, so a bare byte from here does nothing.
+  while (LINK_ENABLED && Serial1.available()) {
+    cmdFeed(linkCmd, (char)Serial1.read());
+  }
+
   buzzerService();
   servoService();
 
@@ -1096,8 +1284,7 @@ void loop() {
   // firmware must do, where losing the link may not disarm anything -- one
   // more reason this code is a test harness and not the flight path.
   if (servoArmed && (millis() - servoLastCmdMs) > SERVO_DEADMAN_MS) {
-    Serial.println();
-    Serial.println(F("  SERVO auto-safe: no host command for 3 s"));
+    Out.println(F("  SERVO auto-safe: no host command for 3 s"));
     servoArm(false);
   }
 
@@ -1194,48 +1381,15 @@ void loop() {
   // nine-field parsers that predate them are unaffected.  The ground station's
   // synthetic producer emits the same fourteen fields, which is what lets the
   // viewer keep a single parser across both transports.
+  //
+  // WIRED DOWNLINK (v0.3.1 stand-in for the radio).  Written every tick,
+  // whatever the USB port is doing -- a radio downlink does not wait to be
+  // asked, and neither does this.  Commands now come UP this wire too, by
+  // deliberate choice; see "THE UPLINK" for what is and is not accepted.
+  if (LINK_ENABLED) { Out.endLine(); emitViz(Serial1, ax, ay, az, gx, gy, gz); }
+
   if (vizMode) {
-    Serial.print(F("V,"));
-    Serial.print(ax, 4);  Serial.print(',');
-    Serial.print(ay, 4);  Serial.print(',');
-    Serial.print(az, 4);  Serial.print(',');
-    Serial.print(gx, 2);  Serial.print(',');
-    Serial.print(gy, 2);  Serial.print(',');
-    Serial.print(gz, 2);  Serial.print(',');
-    Serial.print(alt, 3); Serial.print(',');
-    Serial.print(vel, 3); Serial.print(',');
-    Serial.print(millis());
-
-    // -1 marks "not fitted" for both parts.  Zero would be ambiguous: 0.00 g
-    // is a legal high-g reading in freefall, fix type 0 is a legal "no fix",
-    // and 0,0 is a real position in the Gulf of Guinea.
-    Serial.print(',');
-    if (hgPresent) Serial.print(hgMag, 2); else Serial.print(-1);
-
-    Serial.print(',');
-    if (!gpsPresent) {
-      Serial.print(F("-1,0,0,0,-1"));
-    } else {
-      Serial.print(gpsFixType); Serial.print(',');
-      Serial.print(gpsSats);    Serial.print(',');
-      if (gpsFixType >= 2) {
-        printDegrees(gpsLat); Serial.print(',');
-        printDegrees(gpsLon); Serial.print(',');
-        Serial.print(gpsHAccMm / 1000.0, 2);
-      } else {
-        Serial.print(F("0,0,-1"));
-      }
-    }
-
-    // Servo state, so the viewer displays the BOARD's belief rather than its
-    // own.  If the two ever disagree about whether the latch is armed, that
-    // disagreement is the thing you most need to see.
-    Serial.print(',');
-    Serial.print(servoFired ? 2 : (servoArmed ? 1 : 0));
-    Serial.print(',');
-    Serial.print(servoNowUs);
-
-    Serial.println();
+    emitViz(Serial, ax, ay, az, gx, gy, gz);
     return;
   }
 

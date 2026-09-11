@@ -1,7 +1,7 @@
 # Avionics Status Report
 
 **Water pressure rocket avionics — build status**
-v0.3 · September 2026
+v0.3.1 · September 2026
 
 Where the build has actually got to, subsystem by subsystem. The design is
 specified in [`avionics_documentation.md`](avionics_documentation.md); this
@@ -23,7 +23,7 @@ runs on synthetic data.** Everything else is specified, not built.
 | Bench diagnostics | **Working on hardware** for all four sensors |
 | Pico W ground station + viewer | **Working** — synthetic telemetry only |
 | MG90D servo latch | **Wired to GP6, driven by the diagnostics sketch.** Bench harness only |
-| RFM95W LoRa ×2 | Not connected — no radio link exists |
+| RFM95W LoRa ×2 | On the bench, not driven. A **wired UART downlink** stands in for the radio (v0.3.1) |
 | Latch mechanism, collar joint | Not built — the servo drives nothing yet |
 | Reed switch arming interlock | Not connected |
 | LS3040 buzzer | Not connected |
@@ -205,9 +205,9 @@ locally and is not relied upon.
 - [ ] **Sign off the GPS outdoors** — boot line reading `airborne <1g  OK`,
       then a 3D fix with plausible coordinates within 30–60 s
 - [ ] Paired LoRa TX/RX test with RSSI + packet-loss logging
-- [ ] Wire the radio into the ground station — replace the synthetic producer
-      task with a UART packet reader. The architecture already supports it; no
-      viewer changes needed
+- [ ] Wire the radio into the ground station — the producer slot is proven
+      by the wired downlink; what remains is a LoRa driver on SPI (an RFM95W
+      has no UART) feeding the same `accept_line()`
 - [ ] Build and tune the flight antenna (82 mm, 868 MHz)
 - [ ] Source and fit the ground-station 868 MHz SMA antenna
 
@@ -215,8 +215,8 @@ locally and is not relied upon.
 
 - [x] ~~Add a telemetry staleness timeout~~ — done; 1.5 s gap dims the readouts
       and counts the age of the last frame, in all three viewer builds
-- [ ] Set the operational AP password on the ground station hardware; the value
-      in this repository is a placeholder default
+- [ ] **Set the ground station's Wi-Fi password** in `station_secret.py` — the
+      network now controls the latch, and the default is public
 
 **Measurement and test**
 
