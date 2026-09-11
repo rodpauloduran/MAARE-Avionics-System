@@ -7,16 +7,16 @@ Mapúa University (Intramuros).
 
 ![The attitude viewer running live off the flight computer over USB: 3D vehicle
 model with tilt protractor, numeric readouts for attitude, accelerometer,
-barometer, high-g and GPS, strip charts for altitude, acceleration and tilt,
-and a collapsed serial monitor along the bottom](docs/images/viewer-attitude.png)
+barometer, high-g and GPS, strip charts, and below them the deployment test
+panel and serial monitor, both expanded](docs/images/viewer-attitude.png)
 
-*The viewer on real hardware. Tilt 0.44°, 1.01 g at rest, high-g peak 2.41 g,
-25 Hz on the board's own clock across 3873 frames with zero bad lines. The GPS
+*The viewer on real hardware. Tilt 3.11°, 1.01 g at rest, high-g peak 2.84 g,
+26 Hz on the board's own clock across 15,127 frames with zero bad lines. The GPS
 block reads `no fix`, `no datum` — indoors on a bench that is the correct
 answer, and the pad datum is deliberately withheld rather than taken from a bad
-fix (§4.5). The `Fix gate` toggle beside `Smoothing` relaxes that bar when a
-bench fix is all you have, and the serial monitor is collapsed along the
-bottom.*
+fix (§4.5). Below the charts, the deployment test panel shows the latch
+`FIRED` and refusing to fire again until it is re-latched, and the serial
+monitor shows the fire sequence as the board logged it.*
 
 ---
 
@@ -91,12 +91,15 @@ documents disagree, that one wins.
 
 ![Breadboard bench stack: a Raspberry Pi Pico H with the SparkFun SAM-M8Q GPS,
 Adafruit ADXL375 high-g accelerometer, Pololu MinIMU-9 v6 and GY-63 MS5611
-barometer, all wired to one I²C bus with jumper
-wires](docs/images/bench-stack-1.jpg)
+barometer on one I²C bus, an Adafruit RFM95W LoRa breakout at the front, and
+the MG90D servo and LS3040 buzzer alongside](docs/images/bench-stack-1.jpg)
 
-*The bench stack as built: Pico H, SAM-M8Q, ADXL375, MinIMU-9 v6 and GY-63,
-sharing a single I²C bus. This is the breadboard prototype — the two-deck FR4
-sled specified in §11 of the design document is not built.*
+*The bench stack as built: Pico H, SAM-M8Q, ADXL375, MinIMU-9 v6 and GY-63 on a
+single I²C bus, with the MG90D servo latch and LS3040 buzzer beside it. The
+RFM95W LoRa breakout at the front is on the board but no firmware drives it
+yet — the "900MHz" silkscreen is Adafruit's label for the high-band RFM95W,
+which covers the 868 MHz band this project uses. This is the breadboard
+prototype; the two-deck FR4 sled of §11 is not built.*
 
 | Subsystem | Component |
 |---|---|

@@ -49,10 +49,12 @@ Plenty of margin for a nichrome MOSFET, a second deployment channel, or an OLED.
 | SAM-M8Q GPS | **0x42** | u-blox DDC (I2C) mode. |
 
 ![Bench stack on breadboards: Pico H, SAM-M8Q GPS, ADXL375, MinIMU-9 v6 and
-GY-63 barometer wired to one I²C bus](docs/images/bench-stack-1.jpg)
+GY-63 barometer wired to one I²C bus, with the RFM95W, servo and buzzer
+alongside](docs/images/bench-stack-1.jpg)
 
 *The stack these addresses refer to. Breadboard and jumper wires — the FR4 sled
-of §11 is not built.*
+of §11 is not built. The RFM95W at the front is on SPI rather than this bus, and
+no firmware drives it yet.*
 
 No conflicts. Run an I2C scanner after adding each device and confirm the
 address appears *before* writing any driver code.
@@ -308,6 +310,9 @@ get. Gate on satellites and hAcc (this project uses ≥ 6 sats and ≤ 10 m) or 
 the origin deliberately once the receiver has settled.
 
 ### MG90D servo latch (GP6)
+
+![The MG90D micro servo and LS3040 buzzer on the bench, in front of the
+breadboard stack](docs/images/bench-stack-2.jpg)
 
 **The core bundles no Servo library** (4.6.0 ships only MRI, PDM, SPI,
 Scheduler, ThreadDebug, USBHID, USBMSD, Wire) — install **Servo** from the

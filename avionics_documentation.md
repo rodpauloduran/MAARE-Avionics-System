@@ -186,11 +186,11 @@ All four devices share a single I²C bus at 400 kHz.
 | ADXL375 | `0x53` | `0x1D` if address jumper bridged |
 | SAM-M8Q | `0x42` | u-blox DDC mode |
 
-![The four sensor breakouts and the Pico on breadboards, seen from the
-opposite side, with the SAM-M8Q's chip antenna facing
-up](docs/images/bench-stack-2.jpg)
+![The bench stack on breadboards: the Pico H and the four I²C sensor
+breakouts wired with jumper leads, the SAM-M8Q's chip antenna facing up, and the
+RFM95W, servo and buzzer alongside](docs/images/bench-stack-1.jpg)
 
-*All four devices on one bus, as bench-built. Note this is a breadboard with
+*All four I²C devices on one bus, as bench-built. Note this is a breadboard with
 jumper wires, not the two-deck sled of §11: long unshielded leads and four sets
 of pull-ups in parallel are exactly the conditions the warning below is about.*
 
@@ -847,14 +847,18 @@ readouts by roughly 2.6× on tilt, 3.1× on |a| and 4.7× on altitude, at a cost
 of 0.32 s and 1.12 s respectively to reach 90% of a step.
 
 ![The attitude view: 3D rocket model with a tilt protractor and reference
-axis, a column of numeric readouts, three strip charts, and a collapsed serial
-monitor](docs/images/viewer-attitude.png)
+axis, a column of numeric readouts, three strip charts, and the deployment test
+panel and serial monitor expanded beneath](docs/images/viewer-attitude.png)
 
 *The attitude view driven live over USB. The GPS block shows the pad-datum gate
 holding: with no fix, `FROM PAD` reads `no datum` rather than a fabricated
 distance, and `ACCURACY` reads `—` because there is no estimate to report. The
-raw telemetry line along the bottom is the §6.6 format, with `hg = 0.55` and a
-trailing `0,0,0,0,-1` marking no fix and no accuracy estimate.*
+raw telemetry line is the §6.6 format — `hg = 0.37`, then a trailing
+`0,0,0,0,-1,2,0`: no fix, no accuracy estimate, latch fired, pulse train
+stopped. Beneath it the deployment panel refuses a second fire until the latch
+is re-latched, and the serial monitor shows the board's own log of the fire:
+`SERVO FIRED -> 2000 us`, then safe with the move finishing over the settle
+window, then `pulse train stopped - move complete`.*
 
 **Two stage views, one canvas.** The stage switches between **Attitude** —
 the 3D model, tilt protractor and reference axis — and **Trajectory**, which
@@ -873,6 +877,17 @@ camera that auto-frames the data.
 > fix**, never interpolated. A smooth arc through the gap would be an
 > invention, and the one thing this view must be is trustworthy about where
 > the vehicle actually was.
+
+![The trajectory tab indoors with no GPS fix: a ground grid in perspective with
+a single vertical dashed red line rising from it, and a legend in the lower
+left](docs/images/viewer-trajectory.png)
+
+*The trajectory tab on the bench, indoors, with no fix. The path is a single
+vertical **dashed red** line: altitude is measured, and horizontal is frozen
+because there is neither a lock nor a pad datum — which is exactly what the
+legend in the lower left says, down to the gate's thresholds. Nothing has been
+interpolated, and the connection hint that used to overlap the legend is hidden
+on this tab.*
 
 **The pad datum is gated, not taken from the first fix.** §4.5 explains why:
 the first fix is the worst one of the session, and everything measured from it
@@ -1082,6 +1097,13 @@ termination detection. Charge on a non-flammable surface, never unattended.
 Servo-actuated pin latch at the collar joint between the motor and avionics
 sections. No pyrotechnics — a plastic airframe at this scale does not need
 them, and a resettable mechanism can be bench-tested a hundred times.
+
+![The MG90D micro servo and the LS3040 piezo buzzer on the desk in front of
+the breadboard stack](docs/images/bench-stack-2.jpg)
+
+*The latch actuator and the buzzer as bench-built: MG90D on GP6, LS3040 on GP7.
+The servo drives nothing yet — the collar joint and pin latch of §8.2 are not
+built — so on the bench a moving horn is the whole test.*
 
 **Bench testing (§13.2).** The latch is on **GP6**, driven through the Servo
 library (§9.2), and `servo_smoke/` exists to isolate it — one pin, one servo,
@@ -1491,13 +1513,17 @@ values — °C, hPa, metres AGL, m/s, g, degrees tilt — plus:
 
 ![Serial monitor output at boot: I²C scan listing six addresses, LSM6 control
 registers decoded to ±2 g and ±1000 dps, ADXL375 data rate decoded to 800 Hz,
-GPS dynamic model confirmed as airborne <1g at 5 Hz, gyro bias offsets, and
-ground pressure zeroed at 1004.22 hPa](docs/images/diagnostics-boot.png)
+GPS dynamic model confirmed as airborne <1g at 5 Hz, the buzzer and servo latch
+reporting silent and safe, gyro bias offsets, ground pressure zeroed at
+1007.15 hPa, and the first rows of the live table](docs/images/diagnostics-boot.png)
 
 *Boot output on hardware. Every configuration value on screen was **read back
 from the chip**, not echoed from the code that set it — `CTRL1_XL = 0x50`,
 `CTRL2_G = 0x58`, `BW_RATE = 0xD`, and the GPS reporting `airborne <1g  OK`.
-That is the §4.3 rule doing its job for all three configurable devices at once.*
+That is the §4.3 rule doing its job for all three configurable devices at once.
+The two actuators announce themselves too: the buzzer silent, and the servo
+latch `SAFE at boot, no pulses emitted` — the first interlock of §6.7, visible
+before anything else has run.*
 
 > **One anomaly in that scan: `0x7E  (unknown)`.** Nothing in this design lives
 > there, and 0x78–0x7F is the I²C reserved range, so a device ACKing there is
