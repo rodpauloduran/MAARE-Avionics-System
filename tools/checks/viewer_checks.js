@@ -46,6 +46,15 @@ function getEl(id) {
   if (!els.has(id)) els.set(id, mkEl(id));
   return els.get(id);
 }
+// The deployment panel builds its condition rows in JS, so the stub has to be
+// able to make elements rather than only look them up.
+function mkNew(tag) {
+  const e = mkEl('');
+  e.tagName = String(tag).toUpperCase();
+  e.children = [];
+  e.appendChild = (c) => { e.children.push(c); return c; };
+  return e;
+}
 
 const ctxCalls = { fillText: 0, stroke: 0, arc: 0, moveTo: 0, lineTo: 0, fillRect: 0, measureText: 0 };
 const ctx2d = new Proxy({}, {
@@ -65,6 +74,7 @@ const ctx2d = new Proxy({}, {
 let rafCb = null;
 global.window = global;
 global.document = {
+  createElement: mkNew,
   getElementById: getEl,
   querySelector: () => getEl('__q'),
   querySelectorAll: () => [],
@@ -78,6 +88,10 @@ global.performance = { now: () => Date.now() };
 global.requestAnimationFrame = (cb) => { rafCb = cb; return 1; };
 global.addEventListener = () => {};
 global.matchMedia = () => ({ matches: false, addEventListener: () => {}, addListener: () => {} });
+// No-op timers: a live setInterval from the arm path would keep Node's event
+// loop alive and hang the run after the checks pass.
+global.setInterval = () => 0;
+global.clearInterval = () => {};
 global.devicePixelRatio = 1;
 global.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} };
 global.setTimeout = global.setTimeout;
@@ -98,7 +112,12 @@ try {
              setStage, get stageMode(){return stageMode},
              niceStep, get FIX_NAMES(){return FIX_NAMES},
              consoleAdd, consoleRender, consoleSetOpen,
-             get conBuf(){return conBuf}, get CON_CAP(){return CON_CAP}};`)();
+             get conBuf(){return conBuf}, get CON_CAP(){return CON_CAP},
+             depEvaluate, depSetArmed, depEvalOne, depExport, DEP_PARAMS,
+             get depArmed(){return depArmed},
+             get depConds(){return depConds}, set depConds(v){depConds=v},
+             get depMode(){return depMode},   set depMode(v){depMode=v},
+             get depHoldMs(){return depHoldMs}, set depHoldMs(v){depHoldMs=v}};`)();
 } catch (e) {
   console.log('LOAD FAILED: ' + e.message);
   process.exit(1);
@@ -291,6 +310,94 @@ console.log(`  console: capped at ${api.CON_CAP}, drops oldest first`);
 api.consoleSetOpen(true);
 api.consoleRender(1e9);
 console.log('  console render ran without throwing');
+
+/* ---- deployment harness ------------------------------------------------
+   This drives an actuator, so the checks are about what must NOT happen at
+   least as much as what must. */
+const fired = () => api.conBuf.filter(l => l.indexOf('>> FIRE') === 0).length;
+
+// A condition that is trivially true, so only the guards can stop it.
+api.depConds = [{ on: true, param: 'alt', cmp: 'ge', val: -9999 }];
+api.depMode = 'all';
+api.depHoldMs = 0;
+
+let f0 = fired();
+api.depEvaluate(2e6);
+api.depEvaluate(2e6 + 50);
+check(fired() === f0, 'conditions fired the latch while it was SAFE');
+console.log('  disarmed: conditions met, latch did not fire');
+
+api.depSetArmed(true, 'test');
+check(api.depArmed === true, 'depSetArmed(true) did not arm');
+api.depEvaluate(3e6);
+api.depEvaluate(3e6 + 50);
+check(fired() === f0 + 1, 'armed with conditions met did not fire');
+check(api.depArmed === false, 'latch stayed armed after firing');
+console.log('  armed: fired once, then auto-safed');
+
+/* hold time must actually be waited out */
+api.depHoldMs = 500;
+f0 = fired();
+api.depSetArmed(true, 'test');
+api.depEvaluate(4e6);
+api.depEvaluate(4e6 + 100);
+check(fired() === f0, 'fired before the sustain window elapsed');
+api.depEvaluate(4e6 + 600);
+check(fired() === f0 + 1, 'never fired after the sustain window elapsed');
+console.log('  sustain: held 500 ms before firing, not before');
+
+/* a condition that cannot be evaluated must not count as satisfied */
+api.depHoldMs = 0;
+api.depConds = [{ on: true, param: 'hg', cmp: 'ge', val: -9999 }];
+tel.hg = -1;                                  // part reports "not fitted"
+check(api.depEvalOne(api.depConds[0]).met === false,
+      'an unreadable sensor was treated as a satisfied condition');
+f0 = fired();
+api.depSetArmed(true, 'test');
+api.depEvaluate(5e6);
+api.depEvaluate(5e6 + 50);
+check(fired() === f0, 'fired on a sensor that is not fitted');
+api.depSetArmed(false, 'test');
+console.log('  unreadable sensor: not met, did not fire');
+
+/* ALL vs ANY */
+api.depConds = [{ on: true, param: 'alt', cmp: 'ge', val: -9999 },
+                { on: true, param: 'alt', cmp: 'ge', val: 1e9 }];
+api.depMode = 'all';
+f0 = fired();
+api.depSetArmed(true, 'test');
+api.depEvaluate(6e6);
+api.depEvaluate(6e6 + 50);
+check(fired() === f0, 'ALL fired with one condition unmet');
+api.depMode = 'any';
+api.depEvaluate(6e6 + 100);
+api.depEvaluate(6e6 + 150);
+check(fired() === f0 + 1, 'ANY did not fire with one condition met');
+console.log('  match mode: ALL needs every condition, ANY needs one');
+
+/* The board latches `fired` until an explicit re-latch. Firing into a latch it
+   reports as already fired only earns a refusal, so the harness must not try. */
+api.depConds = [{ on: true, param: 'alt', cmp: 'ge', val: -9999 }];
+api.depMode = 'all';
+api.depHoldMs = 0;
+tel.srv = 2;
+f0 = fired();
+api.depSetArmed(true, 'test');
+api.depEvaluate(7e6);
+api.depEvaluate(7e6 + 50);
+check(fired() === f0, 'fired into a latch the board reports as already fired');
+api.depSetArmed(false, 'test');
+tel.srv = -1;
+console.log('  board-fired guard: will not fire until re-latched');
+
+/* export produces the numbers, and says the logic is not what is exported */
+api.depConds = [{ on: true, param: 'alt', cmp: 'ge', val: 12.5 }];
+const ex = api.depExport();
+check(ex.indexOf('DEP_ALT = 12.5') >= 0, 'export lost the threshold value');
+check(ex.indexOf('DEP_HOLD_MS') >= 0, 'export lost the sustain window');
+console.log('  export: emits thresholds as C constants');
+
+api.depSetArmed(false, 'test cleanup');
 
 /* ---- clear ------------------------------------------------------------- */
 traj.reset();

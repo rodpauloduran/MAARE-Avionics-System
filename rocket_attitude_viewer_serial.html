@@ -125,6 +125,26 @@ button[disabled]{opacity:.4;cursor:not-allowed;box-shadow:none}
   white-space:pre-wrap;word-break:break-word;
   border-top:1px solid var(--rule);background:rgba(23,28,25,.035)}
 @media (max-width:560px){ #conLog{max-height:160px;font-size:10px} }
+/* deployment test harness */
+.deploy{border-top:1px solid var(--rule)}
+.deploy.armed{background:rgba(192,57,43,.07)}
+#depBody{padding:10px 14px 14px;border-top:1px solid var(--rule)}
+.depnote{font-size:11px;color:#5C665F;line-height:1.5;margin:0 0 10px}
+.depnote b{color:var(--red)}
+.deprow{display:flex;gap:6px;align-items:center;margin-bottom:5px;flex-wrap:wrap}
+.deprow select,.deprow input{
+  font:11px/1.4 var(--f-mono);padding:3px 5px;
+  border:1px solid var(--rule);background:var(--paper);color:var(--ink)}
+.deprow input[type=number]{width:74px}
+.depval{font:11px/1.4 var(--f-mono);min-width:104px;opacity:.7}
+.depmet{font:10px/1.4 var(--f-mono);padding:2px 6px;border-radius:3px;min-width:44px;text-align:center}
+.depmet.yes{background:rgba(63,107,69,.18);color:var(--ok)}
+.depmet.no{background:rgba(23,28,25,.07);opacity:.5}
+.depbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0;
+  padding-top:10px;border-top:1px solid var(--rule-soft)}
+.depverdict{font:11px/1.4 var(--f-mono);flex:1;min-width:200px}
+.depverdict.hot{color:var(--red);font-weight:600}
+#depState.armed{color:var(--red);font-weight:600;opacity:1}
 .dot.stale{background:var(--amber)}
 /* board command group */
 .cmdgroup{display:flex;gap:6px;align-items:center}
@@ -311,6 +331,67 @@ footer{
   </div>
 
   <footer id="raw">Waiting for data&hellip;</footer>
+
+  <section class="deploy" id="deploy">
+    <div class="conhead">
+      <button id="depToggle" class="ctab" aria-expanded="false">&#9656; Deployment test</button>
+      <span class="conmeta" id="depState">latch: &mdash;</span>
+      <span class="congrow"></span>
+      <button id="depArm" class="ctab">Arm latch</button>
+      <button id="depFire" class="ctab" disabled>Fire now</button>
+      <button id="depRelatch" class="ctab" disabled>Re-latch</button>
+    </div>
+    <div id="depBody" hidden>
+      <p class="depnote">
+        <b>Bench test harness &mdash; not the flight deployment path.</b>
+        Conditions are evaluated here, in the browser, so thresholds can be
+        changed without a reflash. That is exactly why it must not fly: flight
+        deployment belongs in the state machine on the board and must never
+        depend on a link (&sect;2.3, &sect;5.4). What this is for is finding the
+        numbers that later get compiled into it &mdash; use <b>Export</b> when
+        you have them. Keep hands clear of the latch whenever it reads ARMED.
+      </p>
+
+      <div id="depRows"></div>
+
+      <div class="deprow" style="margin-top:8px">
+        <button id="depAdd" class="ctab">+ condition</button>
+        <span style="width:10px"></span>
+        <label class="depval" style="min-width:0">match</label>
+        <select id="depMode">
+          <option value="all">all of them</option>
+          <option value="any">any of them</option>
+        </select>
+        <label class="depval" style="min-width:0">sustained</label>
+        <input id="depHold" type="number" min="0" max="10000" step="50" value="200">
+        <span class="depval" style="min-width:0">ms</span>
+      </div>
+
+      <div class="depbar">
+        <span class="depverdict" id="depVerdict">&mdash;</span>
+        <button id="depExport" class="ctab">Export thresholds</button>
+      </div>
+
+      <div class="depbar">
+        <span class="depval" style="min-width:0">latched &micro;s</span>
+        <input id="depUsLatch" type="number" min="600" max="2400" step="10" value="1000">
+        <span class="depval" style="min-width:0">released &micro;s</span>
+        <input id="depUsRel" type="number" min="600" max="2400" step="10" value="2000">
+        <button id="depSendPos" class="ctab">Set endpoints</button>
+        <button id="depTestLatch" class="ctab" disabled>Go latched</button>
+        <button id="depTestRel" class="ctab" disabled>Go released</button>
+      </div>
+
+      <div class="depbar">
+        <span class="depval" style="min-width:0">buzzer</span>
+        <button id="buzChirp" class="ctab">Chirp</button>
+        <button id="buzDouble" class="ctab">Double</button>
+        <button id="buzLocate" class="ctab">Locator</button>
+        <button id="buzAlarm" class="ctab">Alarm</button>
+        <button id="buzOff" class="ctab">Off</button>
+      </div>
+    </div>
+  </section>
 
   <section class="console" id="console">
     <div class="conhead">
@@ -746,7 +827,10 @@ const tel={
   // Appended wire fields. null = the firmware predates them and sent nothing;
   // -1 = the firmware sent a value meaning "that part is not fitted". Those
   // are different states and the display distinguishes them.
-  hg:null, hgPeak:0, fix:null, sats:0, lat:0, lon:0, hacc:null
+  hg:null, hgPeak:0, fix:null, sats:0, lat:0, lon:0, hacc:null,
+  // Servo latch as the BOARD reports it, not as this page believes it to be.
+  // srv: -1 no latch on this source, 0 safe, 1 armed, 2 fired.
+  srv:null, srvus:0
 };
 let rateWin=[];
 
@@ -808,6 +892,8 @@ function ingest(parts){
     // hAcc is the receiver's own horizontal accuracy estimate. Without it a
     // position cannot be argued with; with it, the datum can be gated.
     tel.hacc = (n.length>=15) ? n[14] : null;
+    tel.srv   = (n.length>=17) ? n[15] : null;
+    tel.srvus = (n.length>=17) ? n[16] : 0;
     traj.add(tel.alt, tel.fix, tel.lat, tel.lon, tel.hacc, tel.sats, trajStamp());
   }else{
     tel.fix=null; tel.hacc=null;
@@ -974,6 +1060,7 @@ async function readLoop(){
     document.getElementById('btnConnect').textContent='Connect board';
     document.getElementById('btnV').disabled=true;
     cmdButtonsEnabled(false);
+    if(depArmed) depSetArmed(false, 'port closed');
   }
 }
 
@@ -1149,6 +1236,9 @@ function frame(now){
     // Only claim "Live" again if a live source is what we actually have;
     // otherwise this would stomp on the Demo/Disconnected status.
     if(!isStale && liveSrc) setStatus('Live','live');
+    // Telemetry stopped. Whatever the conditions were about to do, they are now
+    // being decided on stale numbers, so the latch comes down.
+    if(isStale && depArmed) depSetArmed(false, 'telemetry went stale');
   }
   // Throttled so the age counter does not write to the DOM every frame.
   if(isStale && now - lastStaleTick > 200){
@@ -1162,6 +1252,7 @@ function frame(now){
   stripAlt.draw(); stripAcc.draw(); stripTilt.draw();
   ui();
   uiExtra();
+  depEvaluate(now);
   consoleRender(now);
   requestAnimationFrame(frame);
 }
@@ -1703,6 +1794,356 @@ function consoleSetOpen(on){
     // next fix establish one if there is none; moving a datum that already
     // exists is what `Set pad` is for, and doing it silently here would shift
     // every distance on screen without the operator asking.
+  });
+})();
+
+/* ============================================================
+   Deployment test harness
+
+   NOT THE FLIGHT DEPLOYMENT PATH. Conditions are evaluated here, in the
+   browser, and a fire command is sent down the wire. That is the right shape
+   for a bench rig -- thresholds change without a reflash, and the operator is
+   standing next to the thing -- and precisely the wrong shape for flight,
+   where deployment must live in the board's own state machine and must never
+   depend on a link. The output of this harness is a set of NUMBERS, which is
+   what gets compiled into the flight firmware. Hence Export.
+   ============================================================ */
+
+const DEP_PARAMS = {
+  alt:     {label:'Altitude',         unit:'m',   get:function(){ return tel.alt; }},
+  /* The apogee detector of the design document, live: peak-and-drop is what
+     actually fires the chute, and this is the knob (APOGEE_DROP_M) that sets
+     how far past apogee it happens. Tuning it against real barometer noise is
+     the single most useful thing this harness can do. */
+  altdrop: {label:'Drop below peak',  unit:'m',   get:function(){ return tel.altPeak - tel.alt; }},
+  vel:     {label:'Vertical velocity',unit:'m/s', get:function(){ return tel.vel; }},
+  tilt:    {label:'Tilt from vertical',unit:'°', get:function(){ return tiltRel(); }},
+  amag:    {label:'|a| (LSM6)',       unit:'g',   get:function(){ return tel.aMag; }},
+  hg:      {label:'|a| high-g',       unit:'g',
+            get:function(){ return (tel.hg==null||tel.hg<0)?NaN:tel.hg; }},
+  gmag:    {label:'Rate magnitude',   unit:'dps', get:function(){ return tel.gMag; }},
+  sats:    {label:'GPS satellites',   unit:'',
+            get:function(){ return (tel.fix==null||tel.fix<0)?NaN:tel.sats; }},
+  tarm:    {label:'Time since arm',   unit:'s',
+            get:function(){ return depArmed?(performance.now()-depArmedAt)/1000:NaN; }}
+};
+
+let depConds = [];
+let depMode = 'all', depHoldMs = 200;
+let depArmed = false, depArmedAt = 0, depHoldSince = 0, depHb = null;
+let depLastUi = 0;
+
+const DEP_KEY = 'maare.deploy.v1';
+
+function depSave(){
+  try{ localStorage.setItem(DEP_KEY, JSON.stringify(
+    {c:depConds, m:depMode, h:depHoldMs,
+     l:+document.getElementById('depUsLatch').value,
+     r:+document.getElementById('depUsRel').value})); }catch(e){}
+}
+function depLoad(){
+  try{
+    const j=JSON.parse(localStorage.getItem(DEP_KEY));
+    if(j){
+      if(Array.isArray(j.c)) depConds=j.c;
+      if(j.m) depMode=j.m;
+      if(isFinite(j.h)) depHoldMs=j.h;
+      if(isFinite(j.l)) document.getElementById('depUsLatch').value=j.l;
+      if(isFinite(j.r)) document.getElementById('depUsRel').value=j.r;
+    }
+  }catch(e){}
+  // The example from the brief: off the ground AND tipped past an angle.
+  if(!depConds.length) depConds=[{on:true,param:'alt',cmp:'ge',val:2},
+                                 {on:true,param:'tilt',cmp:'ge',val:30}];
+}
+
+function depRenderRows(){
+  const host=document.getElementById('depRows');
+  if(!host) return;
+  host.innerHTML='';
+  depConds.forEach(function(c,i){
+    const row=document.createElement('div');
+    row.className='deprow';
+
+    const en=document.createElement('input');
+    en.type='checkbox'; en.checked=!!c.on;
+    en.addEventListener('change',function(){ c.on=en.checked; depSave(); });
+
+    const ps=document.createElement('select');
+    for(const k in DEP_PARAMS){
+      const o=document.createElement('option');
+      o.value=k; o.textContent=DEP_PARAMS[k].label;
+      if(k===c.param) o.selected=true;
+      ps.appendChild(o);
+    }
+    ps.addEventListener('change',function(){ c.param=ps.value; depSave(); depRenderRows(); });
+
+    const cs=document.createElement('select');
+    [['ge','≥'],['le','≤']].forEach(function(pair){
+      const o=document.createElement('option');
+      o.value=pair[0]; o.textContent=pair[1];
+      if(pair[0]===c.cmp) o.selected=true;
+      cs.appendChild(o);
+    });
+    cs.addEventListener('change',function(){ c.cmp=cs.value; depSave(); });
+
+    const vi=document.createElement('input');
+    vi.type='number'; vi.step='any'; vi.value=c.val;
+    vi.addEventListener('input',function(){ c.val=parseFloat(vi.value); depSave(); });
+
+    const unit=document.createElement('span');
+    unit.className='depval'; unit.style.minWidth='0';
+    unit.textContent=DEP_PARAMS[c.param]?DEP_PARAMS[c.param].unit:'';
+
+    const live=document.createElement('span');
+    live.className='depval'; live.id='depLive'+i;
+
+    const met=document.createElement('span');
+    met.className='depmet no'; met.id='depMet'+i; met.textContent='—';
+
+    const del=document.createElement('button');
+    del.className='ctab'; del.textContent='×';
+    del.title='remove this condition';
+    del.addEventListener('click',function(){ depConds.splice(i,1); depSave(); depRenderRows(); });
+
+    row.appendChild(en); row.appendChild(ps); row.appendChild(cs);
+    row.appendChild(vi); row.appendChild(unit); row.appendChild(live);
+    row.appendChild(met); row.appendChild(del);
+    host.appendChild(row);
+  });
+}
+
+function depEvalOne(c){
+  const p=DEP_PARAMS[c.param];
+  if(!p) return {v:NaN, met:false};
+  const v=p.get();
+  // A condition whose value cannot be evaluated is NOT met. Treating an
+  // unreadable sensor as a satisfied condition is how a harness fires on a
+  // part that is not even fitted.
+  if(!isFinite(v) || !isFinite(c.val)) return {v:v, met:false};
+  return {v:v, met: c.cmp==='ge' ? (v>=c.val) : (v<=c.val)};
+}
+
+function depSetArmed(on, why){
+  if(depArmed===on) return;
+  depArmed=on;
+  depHoldSince=0;
+  if(on){
+    depArmedAt=performance.now();
+    sendChar('!arm\n');
+    // The board disarms itself after 3 s of silence. This is what keeps it
+    // armed while the operator is actually watching.
+    depHb=setInterval(function(){ sendChar('!hb\n'); }, 1000);
+  }else{
+    if(depHb){ clearInterval(depHb); depHb=null; }
+    sendChar('!safe\n');
+  }
+  const sec=document.getElementById('deploy');
+  if(sec) sec.classList.toggle('armed', on);
+  const btn=document.getElementById('depArm');
+  if(btn) btn.textContent = on ? 'DISARM' : 'Arm latch';
+  ['depFire','depRelatch','depTestLatch','depTestRel'].forEach(function(id){
+    const b=document.getElementById(id);
+    if(b) b.disabled=!on;
+  });
+  if(why) consoleAdd('>> latch ' + (on?'ARMED':'SAFE') + ' — ' + why);
+}
+
+function depFire(why){
+  if(!depArmed) return;
+  sendChar('!fire\n');
+  consoleAdd('>> FIRE — ' + why);
+  // Disarm after firing. A test rig that stays hot after doing the thing is
+  // how the second, unintended actuation happens.
+  depSetArmed(false, 'auto-safe after firing');
+}
+
+function depEvaluate(now){
+  const active=depConds.filter(function(c){ return c.on; });
+  let allMet=active.length>0, anyMet=false;
+  const results=depConds.map(function(c){ return depEvalOne(c); });
+
+  depConds.forEach(function(c,i){
+    if(!c.on) return;
+    if(results[i].met) anyMet=true; else allMet=false;
+  });
+  const pass = active.length>0 && (depMode==='all' ? allMet : anyMet);
+
+  // The board latches `fired` until an explicit re-latch -- deliberately, as
+  // with deployFired in the design document. So when it reports fired, sending
+  // another fire only earns a refusal; say so instead of firing into it.
+  const boardFired = (tel.srv===2);
+
+  if(pass){
+    if(!depHoldSince) depHoldSince=now;
+    if(depArmed && !boardFired && (now-depHoldSince)>=depHoldMs){
+      depFire('conditions held ' + depHoldMs + ' ms');
+      return;
+    }
+  }else{
+    depHoldSince=0;
+  }
+
+  if(now-depLastUi < 100) return;      // 10 Hz is plenty for a form
+  depLastUi=now;
+
+  depConds.forEach(function(c,i){
+    const lv=document.getElementById('depLive'+i);
+    const mv=document.getElementById('depMet'+i);
+    if(lv){
+      const v=results[i].v;
+      const t=isFinite(v) ? v.toFixed(2) : 'no data';
+      if(lv.textContent!==t) lv.textContent=t;
+    }
+    if(mv){
+      const on=c.on && results[i].met;
+      const t=!c.on ? 'off' : (results[i].met ? 'met' : '—');
+      if(mv.textContent!==t) mv.textContent=t;
+      mv.className='depmet ' + (on?'yes':'no');
+    }
+  });
+
+  const vd=document.getElementById('depVerdict');
+  if(vd){
+    let t;
+    if(tel.srv===2)         t='latch already FIRED — re-latch before testing again';
+    else if(!active.length) t='no conditions enabled';
+    else if(!pass)          t='conditions not met';
+    else if(!depArmed)      t='conditions MET — latch is safe, nothing will fire';
+    else {
+      const held=Math.max(0, depHoldMs-(now-depHoldSince));
+      t='conditions MET — firing in ' + (held/1000).toFixed(2) + ' s';
+    }
+    if(vd.textContent!==t) vd.textContent=t;
+    vd.classList.toggle('hot', pass && depArmed);
+  }
+
+  // The board's own view of the latch, which is the one that matters. If it
+  // disagrees with this page -- the 3 s deadman having fired, say -- the
+  // disagreement is exactly what needs to be visible.
+  const st=document.getElementById('depState');
+  if(st){
+    let t;
+    if(tel.srv==null)     t='latch: no data';
+    else if(tel.srv<0)    t='latch: not on this source';
+    else if(tel.srv===2)  t='latch: FIRED @ ' + tel.srvus + ' µs';
+    else if(tel.srv===1)  t='latch: ARMED @ ' + (tel.srvus||'idle') + (tel.srvus?' µs':'');
+    else                  t='latch: safe';
+    if(st.textContent!==t) st.textContent=t;
+    st.classList.toggle('armed', tel.srv===1 || tel.srv===2);
+  }
+}
+
+function depExport(){
+  const out=['// Deployment thresholds, tuned on the bench harness.',
+             '// Match: ' + depMode.toUpperCase() + ', sustained ' + depHoldMs + ' ms.',
+             '// These are the numbers; the LOGIC belongs in the flight state',
+             '// machine, not in a browser.',
+             ''];
+  depConds.forEach(function(c){
+    if(!c.on) return;
+    const p=DEP_PARAMS[c.param];
+    out.push('const float DEP_' + c.param.toUpperCase() + ' = ' + c.val + ';'
+             + '   // ' + p.label + ' ' + (c.cmp==='ge'?'>=':'<=') + ' ' + c.val
+             + (p.unit?(' ' + p.unit):''));
+  });
+  out.push('const uint16_t DEP_HOLD_MS = ' + depHoldMs + ';');
+  return out.join('\n');
+}
+
+(function(){
+  depLoad();
+  depRenderRows();
+  const md=document.getElementById('depMode'); if(md) md.value=depMode;
+  const hd=document.getElementById('depHold'); if(hd) hd.value=depHoldMs;
+
+  const tg=document.getElementById('depToggle');
+  if(tg) tg.addEventListener('click', function(){
+    const body=document.getElementById('depBody');
+    const on=body.hidden;
+    body.hidden=!on;
+    tg.innerHTML=(on?'▾':'▸')+' Deployment test';
+    tg.setAttribute('aria-expanded', on?'true':'false');
+  });
+
+  if(md) md.addEventListener('change', function(){ depMode=md.value; depSave(); });
+  if(hd) hd.addEventListener('input', function(){
+    const v=parseInt(hd.value,10);
+    if(isFinite(v)) { depHoldMs=Math.max(0,v); depSave(); }
+  });
+
+  const add=document.getElementById('depAdd');
+  if(add) add.addEventListener('click', function(){
+    depConds.push({on:true,param:'alt',cmp:'ge',val:0});
+    depSave(); depRenderRows();
+  });
+
+  const arm=document.getElementById('depArm');
+  if(arm) arm.addEventListener('click', function(){
+    depSetArmed(!depArmed, 'operator');
+  });
+
+  const fire=document.getElementById('depFire');
+  if(fire) fire.addEventListener('click', function(){
+    if(tel.srv===2){
+      consoleAdd('>> fire not sent — board reports the latch already fired; re-latch first');
+      return;
+    }
+    depFire('manual');
+  });
+
+  const rel=document.getElementById('depRelatch');
+  if(rel) rel.addEventListener('click', function(){
+    sendChar('!latch\n'); consoleAdd('>> re-latch');
+  });
+
+  const sp=document.getElementById('depSendPos');
+  if(sp) sp.addEventListener('click', function(){
+    const a=document.getElementById('depUsLatch').value;
+    const b=document.getElementById('depUsRel').value;
+    sendChar('!pos ' + a + ' ' + b + '\n');
+    consoleAdd('>> endpoints ' + a + ' / ' + b + ' us');
+    depSave();
+  });
+
+  const tl=document.getElementById('depTestLatch');
+  if(tl) tl.addEventListener('click', function(){
+    sendChar('!us ' + document.getElementById('depUsLatch').value + '\n');
+  });
+  const tr=document.getElementById('depTestRel');
+  if(tr) tr.addEventListener('click', function(){
+    sendChar('!us ' + document.getElementById('depUsRel').value + '\n');
+  });
+
+  const ex=document.getElementById('depExport');
+  if(ex) ex.addEventListener('click', function(){
+    const btn=this, text=depExport();
+    consoleAdd(text);
+    const done=function(ok){
+      btn.textContent = ok ? 'Copied' : 'In console';
+      setTimeout(function(){ btn.textContent='Export thresholds'; }, 1400);
+    };
+    try{ navigator.clipboard.writeText(text).then(function(){done(true);},
+                                                  function(){done(false);}); }
+    catch(e){ done(false); }
+  });
+})();
+
+/* ---- buzzer -------------------------------------------------------------
+   The board owns the patterns; this only names one. Keeping the timing on the
+   board means a beep does not stop because a browser tab was backgrounded --
+   which matters most for the locator, the one pattern that runs when nobody is
+   looking at a screen at all. */
+(function(){
+  const pats=[['buzChirp','chirp'],['buzDouble','double'],
+              ['buzLocate','locate'],['buzAlarm','alarm'],['buzOff','off']];
+  pats.forEach(function(pair){
+    const el=document.getElementById(pair[0]);
+    if(!el) return;
+    el.addEventListener('click', function(){
+      sendChar('!buz ' + pair[1] + '\n');
+      consoleAdd('>> buzzer ' + pair[1]);
+    });
   });
 })();
 </script>

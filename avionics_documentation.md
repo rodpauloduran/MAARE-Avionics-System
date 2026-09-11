@@ -1,6 +1,6 @@
 # Water Rocket Avionics System — Design Documentation
 
-**v0.2.1 · September 2026**
+**v0.3 · September 2026**
 Mapúa University (Intramuros)
 
 > **What is built.** All four I²C sensors are now on the flight computer — the
@@ -775,7 +775,7 @@ One line format is shared by the serial path and the Wi-Fi path, so the viewer
 has a single parser regardless of how frames arrive:
 
 ```
-V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc
+V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus
 ```
 
 Accelerations in g, rates in dps, altitude in metres AGL, velocity in m/s. The
@@ -789,6 +789,8 @@ high-g accelerometer and the GPS.
 | `sats` | Satellites used in the solution |
 | `lat`, `lon` | Decimal degrees, `0` when there is no fix |
 | `hacc` | The receiver's **own** horizontal accuracy estimate in metres, or **−1** with no fix or no GPS |
+| `srv` | Servo latch: `0` safe, `1` armed, `2` armed and fired, **−1** if the source has no latch |
+| `srvus` | Pulse width **commanded** to the latch in µs; `0` when not driven |
 
 `hacc` earns its place because a position with no accuracy beside it cannot be
 argued with — see §4.5, where a 3D fix on five satellites wandered 238 m and
@@ -932,6 +934,58 @@ or more while they average, so frames genuinely stop. The staleness indicator
 below is suppressed for the duration: the flag would be *correct*, but crying
 outage about a pause the operator asked for trains people to ignore it.
 
+**A deployment test harness drives the latch.** A collapsed panel — collapsed
+because it is an actuator control — holds an arm/safe toggle, a manual fire and
+re-latch, endpoint calibration in microseconds, and a list of trigger conditions
+you can edit live: altitude, drop below peak, vertical velocity, tilt, |a|,
+high-g, rate magnitude, satellite count, and time since arming. Each takes a
+comparator and a threshold, and the set combines with **all** or **any**. A
+**sustain window** requires the conditions to hold continuously before firing —
+the same reasoning as `APOGEE_SAMPLES` in §5.4, since a single threshold
+crossing on noisy barometric data is exactly what you must not fire on.
+
+`Drop below peak` is there deliberately: it is the primary apogee trigger of
+§5.4, and tuning it against real barometer noise is the most useful thing this
+harness does. **Export** emits the tuned values as C constants for the flight
+firmware, because the numbers are the deliverable — the logic is not.
+
+Four interlocks, in the order they matter:
+
+- The board **does not drive the pin at boot**. The servo is not attached, so
+  no pulse train exists at all and no position is commanded until somebody arms
+  it. Arming attaches; the library emits nothing until the first write.
+- **Nothing moves while disarmed**, and arming does not itself move anything —
+  if arming drove the horn, preparing to test would be the test.
+- A **3 s deadman on the board** disarms the latch if the host goes quiet. Note
+  this is the opposite of what flight firmware must do, which is one more reason
+  this is a harness and not the flight path.
+- **Firing latches, and auto-safes.** The board refuses a second fire without an
+  explicit re-latch; the viewer disarms itself afterwards, and also on telemetry
+  staleness or a closed port. A test rig that stays hot after doing the thing is
+  how the second, unintended actuation happens.
+
+  **But safe must not truncate the move it follows** — and at first it did.
+  The viewer sends `!fire` and then `!safe` back to back, and `!safe` detached
+  the servo a millisecond after `!fire` had written the released position. That
+  cut the pulse train long before the horn could travel, so Fire and every
+  condition-triggered fire did nothing, while `!us` and `!latch` — which leave
+  the servo attached — worked perfectly. The interlock defeated the action it
+  guarded. Safe now refuses new motion from the instant it arrives, but lets a
+  move already commanded run for an **800 ms settle window** before the pulse
+  train stops. The timing lives on the board, where the actuator is, so it holds
+  whatever sends the commands.
+
+The panel shows the **board's** view of the latch, not the page's belief. If the
+two disagree — the deadman having fired, say — that disagreement is the thing
+you most need to see.
+
+**Buzzer patterns are selectable** from the same panel: chirp, double, locator
+and alarm, plus off. The board owns the timing, not the page — a beep that
+stopped because a browser tab was backgrounded would be worst for the locator,
+the one pattern that runs when nobody is looking at a screen. Arming the latch
+chirps and firing it double-beeps, which is §8.5's arming confirmation made
+audible.
+
 **A serial monitor is built into the page.** The footer shows only the most
 recent line, which is useless the moment the board says anything worth reading —
 the boot banner, the decoded configuration registers, the reply to a `g`
@@ -1028,6 +1082,30 @@ termination detection. Charge on a non-flammable surface, never unattended.
 Servo-actuated pin latch at the collar joint between the motor and avionics
 sections. No pyrotechnics — a plastic airframe at this scale does not need
 them, and a resettable mechanism can be bench-tested a hundred times.
+
+**Bench testing (§13.2).** The latch is on **GP6**, driven through the Servo
+library (§9.2), and `servo_smoke/` exists to isolate it — one pin, one servo,
+no sensors — for when the question is whether a stationary latch is firmware or
+wiring. The diagnostics sketch drives it, with a configurable trigger harness in the viewer (§6.7). Two things
+about that are worth stating here rather than leaving implied:
+
+**The harness is not the flight path.** Its conditions are evaluated in the
+browser and a fire command is sent down the wire. That is the right shape for a
+bench rig — thresholds change without a reflash, and the operator is standing
+next to the actuator — and exactly the wrong shape for flight, where deployment
+must live in this board's own state machine and must never depend on a link
+(§2.3, §5.4). What the harness produces is a set of *numbers*; those are what
+get compiled into the flight firmware.
+
+**A servo is the one device here with no readback.** §4.3 makes reading
+configuration back from the hardware the standing rule, and a hobby servo
+cannot honour it: there is no feedback path at all. The `srvus` field of §6.6
+is what was *commanded*, never what the horn did, and a stalled, stripped or
+unpowered servo reports exactly the same as a healthy one. Firmware cannot fix
+this. The honest answer is mechanical — **a limit or reed switch on the latch
+confirming the pin actually withdrew** — and it is an open item. Until it
+exists, treat "fired" as "commanded to fire", and confirm release by eye or by
+the ×50 pull test.
 
 **The critical design rule: the servo must never carry structural load.**
 
@@ -1136,21 +1214,58 @@ Recovery is the reverse: **disarm first**, before touching the vehicle.
 | SPI0 MOSI | GP19 | 25 | RFM95W |
 | LoRa RESET | GP20 | 26 | Tie high if pins tight |
 | LoRa DIO0 | GP21 | 27 | Or poll registers |
-| Servo PWM | GP15 | 20 | 50 Hz, separate rail |
-| Buzzer | GP13 | 17 | Transistor if 5 V |
+| Servo PWM | **GP6** | 9 | 50 Hz, separate rail. **As built** — this section specified GP15; the servo is on GP6 |
+| Buzzer | **GP7** | 10 | **As built** — this section specified GP13. LS3040 piezo, ~4 kHz. Transistor if driven above 3V3 |
 | Reed (arming) | GP12 | 16 | Pull-up, switch to GND |
 | Battery sense | GP26 | 31 | ADC0 via 100k/100k |
 | Status LED | GP25 | — | Onboard |
 | VSYS (batt in) | — | 39 | 1.8–5.5 V |
 | GND | — | 38 | Common with servo |
 
-Free: GP0–GP3, GP6–GP11, GP14, GP22, GP27, GP28 — ample margin for a nichrome
-backup channel, second deployment event, or an OLED.
+Free: GP0–GP3, GP8–GP11, GP13, GP14, GP15, GP22, GP27, GP28 — ample margin for
+a nichrome backup channel, second deployment event, or an OLED. (GP15 and GP13
+are free again now the servo and buzzer sit on GP6 and GP7.)
 
 ### 9.2 Toolchain
 
 **Official Arduino Mbed OS RP2040 core** (not the Earle Philhower community
 core). This has non-obvious consequences — see §10.1.
+
+> **The Mbed core does not bundle a Servo library.** This table previously said
+> it did. Verified against core 4.6.0, whose entire bundled set is MRI, PDM,
+> SPI, Scheduler, ThreadDebug, USBHID, USBMSD and Wire. Install **Servo** from
+> the Library Manager; it declares `mbed_rp2040` support and ships an mbed
+> backend. **Confirmed working on hardware.**
+>
+> **`mbed::PwmOut` is untested — not known to be broken.** It was tried first,
+> and the servo did not move. An earlier revision of this document concluded
+> from that that `PwmOut` does not drive the pin on this core, and backed the
+> conclusion with the observation that the Servo library and the core's own
+> `tone()` both bit-bang with `DigitalOut` and a `Ticker` rather than use it.
+> **Both halves of that are withdrawn.** The servo was faulty: a replacement
+> moved under a raw bit-bang and under the library on the first try, and
+> `PwmOut` was never re-tested against a working one. And a library's choice of
+> mechanism is not evidence about a peripheral — software timing supports any
+> pin, where hardware PWM is tied to a slice, which is reason enough on its own.
+>
+> This is worth keeping as a lesson rather than quietly deleting, because it is
+> the project's recurring failure mode wearing a new coat: **a faulty actuator
+> made working firmware look broken**, and a plausible explanation was then
+> built on top of the wrong premise. The defence is the one `servo_smoke/`
+> provides — a raw bit-bang that removes all software from the question — and a
+> known-good unit swapped in *before* the firmware is blamed.
+>
+> ```cpp
+> #include <Servo.h>
+> Servo latch;
+> latch.attach(6, 600, 2400);      // no pulses until the first write
+> latch.writeMicroseconds(1500);
+> latch.detach();                  // stops the pulse train entirely
+> ```
+>
+> **Consequence worth carrying:** the pulse comes from interrupts rather than
+> PWM hardware, so it has some jitter and a little ISR cost. Fine for a bench
+> latch; re-check it before it shares a core with a 500 Hz flight loop.
 
 **Sketch layout.** The Arduino IDE requires a `.ino` to sit in a folder of the
 same name, so each sketch gets its own directory — `rocket_diagnostics/`,
@@ -1165,7 +1280,7 @@ to relocate it, and two of them at the root cannot both be opened cleanly.
 | ADXL375 | Adafruit ADXL375 (+ Adafruit_Sensor, Adafruit_BusIO) |
 | GPS | SparkFun u-blox GNSS Arduino Library |
 | LoRa | **RadioLib** — RadioHead support on this core is patchy |
-| Servo | Bundled with core |
+| Servo | **Servo** by Arduino — install from Library Manager, *not* bundled. See below |
 
 ---
 
@@ -1498,6 +1613,12 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 - [x] Board command buttons in the viewer over Web Serial (§6.7)
 - [x] `hAcc` carried in telemetry, with the pad datum gated on satellite count
       and accuracy rather than taken from the first fix (§4.5, §6.7)
+- [x] MG90D servo latch on GP6, driven by the diagnostics sketch through the
+      Servo library, with a configurable trigger harness in the viewer and
+      arm / deadman / fire-latching interlocks (§6.7, §8.1). **Confirmed moving
+      on hardware**, under both a raw bit-bang and the Servo library, on VBUS
+- [x] LS3040 buzzer on GP7 with non-blocking pattern playback, arming chirp and
+      fire confirmation (§6.7)
 - [x] Attitude viewer, with dual serial/Wi-Fi transport (§6.7)
 - [x] Pico W ground station, serving the viewer over its own Wi-Fi (§6.5)
 - [x] Telemetry wire format, shared across both transports (§6.6)
@@ -1506,6 +1627,18 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 **Open items:**
 
+- [ ] **Keep VBUS in mind as the servo supply ages or loads up.** It works
+      today, but it is USB 5 V behind a Schottky — roughly 4.7 V idle, sagging
+      under load — against an MG90D specified from 4.8 V, and a USB port
+      current-limits near the servo's ~700 mA stall. Fine on a bench with the
+      latch unloaded; re-check before the latch is working against a packed
+      chute, and move to its own supply for flight regardless (§7)
+- [ ] **Add mechanical confirmation that the latch released** — a limit or
+      reed switch on the pin. A servo has no feedback path, so "fired" currently
+      means "commanded to fire" and a stalled servo is indistinguishable from a
+      healthy one (§8.1)
+- [ ] Verify the latch on its **own supply with the 220 µF fitted** — servo
+      inrush browning out the Pico would reboot the board holding the actuator
 - [ ] **Trim the ADXL375 zero-g offset** — per-axis, against a known
       orientation. It reads 0.73 g at rest against the LSM6's 1.01 g, which is
       within specification for a ±200 g part but leaves the channel unusable
@@ -1551,6 +1684,7 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 | `hardware_reference.md` | Quick bench reference — pin map, addresses, per-sensor driver notes, bring-up order. Kept in sync with this document; **this document is the authority** where the two disagree |
 | `tools/checks/` | Headless checks for the ground station telemetry model and all three viewer builds. No hardware; `python tools/checks/run_checks.py` |
 | `rocket_diagnostics/` | Bench diagnostics sketch (verified working on hardware) |
+| `servo_smoke/` | Minimal servo sweep on GP6. No sensors, no logic — isolates a stationary latch as firmware versus wiring and power |
 | `rocket_flight/` | Flight firmware skeleton — state machine, threading, telemetry. **Not written** (§14) |
 | `rocket_attitude_viewer.html` | **Live 3D attitude viewer.** Self-contained; Web Serial over USB or SSE over Wi-Fi (§6.7) |
 | `rocket_attitude_viewer_serial.html` | Serial-only build of the viewer. The bench path that works *today*, driving the viewer straight off the flight computer over USB while the flight-to-ground radio does not yet exist (§6.7) |
@@ -1567,7 +1701,7 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 ---
 
-*v0.2.1 — September 2026. This document reflects design intent and analysis,
+*v0.3 — September 2026. This document reflects design intent and analysis,
 much of it first-order rather than validated. Numbers marked as estimates
 should be confirmed by test or FEA before they are relied upon for flight
 safety.*

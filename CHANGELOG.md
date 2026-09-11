@@ -6,6 +6,117 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.3.0] — 2026-09-11
+
+### Added
+
+**MG90D servo latch on GP6, with a configurable trigger harness in the viewer.**
+
+- **Firmware.** The latch is driven through the **Servo** library. New `!`
+  prefixed line commands carry the values a single character cannot:
+  `!arm`, `!safe`, `!fire`, `!latch`, `!us <n>`, `!pos <a> <b>`, `!srv`, `!hb`.
+  The existing single-character commands are untouched and still dispatch on
+  arrival, so a truncated line can never be mistaken for one.
+- **Wire format** gained `srv` and `srvus` — appended, so 8/9-field parsers are
+  still unaffected. The viewer shows the **board's** view of the latch, not its
+  own belief; if the two disagree, that is the thing worth seeing.
+- **Viewer panel** (collapsed by default, because it is an actuator control):
+  arm/safe, manual fire and re-latch, endpoint calibration in microseconds, and
+  an editable condition list — altitude, drop below peak, vertical velocity,
+  tilt, |a|, high-g, rate magnitude, satellites, time since arm — each with a
+  comparator and threshold, combined with **all** or **any**, and a **sustain
+  window** the conditions must hold before firing. Settings persist across
+  reloads. **Export** emits the tuned values as C constants.
+
+**Interlocks**, in the order they matter: the pin is **not driven at boot**
+(period set, pulse width zero); nothing moves while disarmed, and arming does
+not itself move anything; a **3 s deadman on the board** disarms if the host
+goes quiet; firing latches and auto-safes, and the viewer also disarms on
+telemetry staleness or a closed port.
+
+> **This is a bench harness, not the flight deployment path.** Conditions are
+> evaluated in the browser and a fire command is sent down the wire — the right
+> shape for a bench rig, and exactly the wrong shape for flight, where
+> deployment must live in the board's state machine and never depend on a link
+> (§2.3, §5.4). The harness produces *numbers*; those are what get compiled
+> into the flight firmware.
+
+- **LS3040 buzzer on GP7**, with non-blocking pattern playback — chirp, double,
+  locator, alarm — selectable from the viewer, plus `!beep <hz> <ms>` for a
+  one-shot. Arming the latch chirps and firing it double-beeps, which is
+  §8.5's arming confirmation made audible. The board owns the timing, so a
+  backgrounded browser tab cannot silence the locator.
+- **Pin map reconciled again:** §9.1 specified the buzzer on GP13; it is on
+  **GP7**. GP13 returns to the free list.
+
+### Fixed
+
+- **`tone()` leaks on this core, so the buzzer does not use it.**
+  `Tone::stop()` nulls the `DigitalOut` *pointer* instead of writing the pin
+  low, so `delete pin` frees nothing and every call leaks one `DigitalOut` —
+  and the pin can be left HIGH, putting DC across a piezo after the beep.
+  The buzzer drives a `DigitalOut` from a `Ticker` directly, allocated once.
+- **Fire, and every condition-triggered fire, did nothing** — while `Go
+  latched`, `Go released` and `Re-latch` all worked. The viewer sends `!fire`
+  and then `!safe` back to back, as an interlock against a test rig staying hot.
+  But `!safe` detached the servo a millisecond after `!fire` wrote the released
+  position, cutting the pulse train before the horn could travel. The commands
+  that worked were exactly the ones that leave the servo attached. Fixed on the
+  board: safe refuses new motion immediately, but lets an already-commanded
+  move finish over an **800 ms settle window** before stopping the pulse train.
+  The interlock had been defeating the action it guarded.
+- **The viewer no longer fires into a latch the board reports as already
+  fired.** The board keeps `fired` latched until an explicit re-latch, as with
+  `deployFired` in §5.4, so a second fire only earned a silent refusal. The
+  condition engine now holds off, and the verdict says to re-latch first.
+- **The servo did not move — because the servo was faulty.** A replacement
+  moved under both a raw bit-bang and the Servo library, on VBUS, on the first
+  try. Along the way the latch moved from `mbed::PwmOut` to the **Servo**
+  library, which is confirmed working and stays. Attach/detach now serve as the
+  arm/safe states, a stronger guarantee than a zero pulse width: detached, no
+  pulse train exists at all.
+
+  **Withdrawn:** an earlier entry here claimed `PwmOut` "compiles on this core
+  and does not drive the pin", and cited the Servo library and `tone()` both
+  avoiding it as evidence. Neither holds. `PwmOut` was only ever tried against
+  the faulty servo, so it is *untested*; and a library's choice of mechanism is
+  not evidence about a peripheral — software timing works on any pin, which is
+  reason enough. Kept on the record rather than deleted, because a dead
+  actuator making working firmware look broken is exactly the kind of silent
+  failure this project exists to catch, and it caught this one late.
+- **Added `servo_smoke/`** — one pin, one servo, no sensors or logic — so a
+  stationary latch can be separated into firmware versus wiring and power in a
+  single flash.
+- **The design document claimed the Mbed core bundles a Servo library. It does
+  not.** Verified against core 4.6.0, whose entire bundled set is MRI, PDM, SPI,
+  Scheduler, ThreadDebug, USBHID, USBMSD and Wire. Corrected in §9.2 and the
+  hardware reference, with the Library Manager install documented in its place.
+- **Pin map reconciled to as-built.** §9.1 specified the servo on GP15; it is on
+  **GP6**. Both documents now say GP6, and GP15 returns to the free list.
+
+### Known, unresolved
+
+- **The Fire path has not been confirmed on hardware.** The early-detach bug is
+  fixed and the firmware compiles; the viewer's firing logic passes the
+  headless checks. But the servo has not yet been *seen* to swing on `Fire` or
+  on a condition-triggered fire since the fix. `Go latched`, `Go released` and
+  `Re-latch` are confirmed. Treat conditional firing as unverified until it has
+  been watched.
+- **`mbed::PwmOut` is untested on this core**, not known-broken — see above.
+- **VBUS is marginal for this servo on paper**, though it works in practice:
+  USB 5 V behind a Schottky is roughly 4.7 V, against an MG90D specified from
+  4.8 V, and a USB port current-limits near the servo's ~700 mA stall. Fine for
+  an unloaded bench latch; re-check under a packed chute, and give it its own
+  supply for flight.
+- **A servo has no readback, and this project's standing rule cannot be applied
+  to it.** `srvus` is what was *commanded*, never what the horn did — a stalled,
+  stripped or unpowered servo reports exactly the same as a healthy one. The
+  honest fix is mechanical: a limit or reed switch confirming the pin withdrew.
+  Until then, "fired" means "commanded to fire".
+- The latch has not been run on its own supply with the 220 µF fitted.
+
+---
+
 ## [0.2.1] — 2026-09-09
 
 ### Added
@@ -318,7 +429,8 @@ only, and the tilt inhibit is specified but not implemented.
 
 ---
 
-[Unreleased]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/rodpauloduran/MAARE-Avionics-System/releases/tag/v0.1.0

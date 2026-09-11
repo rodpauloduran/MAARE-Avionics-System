@@ -25,16 +25,16 @@ Target: Raspberry Pi Pico (RP2040), **official Arduino Mbed OS RP2040 core**
 | SPI0 MOSI | GP19 | 25 | RFM95W |
 | LoRa RESET | GP20 | 26 | Can tie high if pins are tight |
 | LoRa DIO0 | GP21 | 27 | IRQ; can poll registers instead |
-| Servo PWM | GP15 | 20 | 50 Hz, separate power rail |
-| Buzzer | GP13 | 17 | Via NPN/MOSFET if running at 5 V |
+| Servo PWM | **GP6** | 9 | 50 Hz, separate power rail. As built; §9.1 of the design doc specified GP15 |
+| Buzzer | **GP7** | 10 | As built; §9.1 specified GP13. LS3040 piezo, ~4 kHz |
 | Reed switch (arming) | GP12 | 16 | Internal pull-up, switch to GND |
 | Battery sense | GP26 | 31 | ADC0, via 100k/100k divider |
 | Status LED | GP25 | — | Onboard |
 | VSYS (battery in) | — | 39 | 1.8–5.5 V, buck-boost handles LiPo range |
 | GND | — | 38 | Common ground with servo |
 
-**Free after this:** GP0–GP3, GP6–GP11, GP14, GP22, GP27, GP28. Plenty of margin
-for a nichrome MOSFET, a second deployment channel, or an OLED.
+**Free after this:** GP0–GP3, GP8–GP11, GP13, GP14, GP15, GP22, GP27, GP28.
+Plenty of margin for a nichrome MOSFET, a second deployment channel, or an OLED.
 
 ---
 
@@ -105,7 +105,7 @@ Install via Arduino Library Manager unless noted.
 | ADXL375 | **Adafruit ADXL375** (+ Adafruit_Sensor, Adafruit_BusIO) | `#include <Adafruit_ADXL375.h>` |
 | GPS | **SparkFun u-blox GNSS Arduino Library** | `#include <SparkFun_u-blox_GNSS_Arduino_Library.h>` |
 | LoRa | **RadioLib** by Jan Gromes | `#include <RadioLib.h>` |
-| Servo | Bundled with the core | `#include <Servo.h>` |
+| Servo | **Servo** by Arduino — install it; the core bundles none (verified against 4.6.0) | `#include <Servo.h>` |
 | Filesystem | **None — LittleFS is not bundled on this core.** Logs dump over USB serial as CSV (§10.1). |
 
 ---
@@ -306,6 +306,88 @@ int32_t hAccMm = gnss.getHorizontalAccEst();   // mm; print it next to the fix
 **And never datum anything on the first fix** — it is the worst one you will
 get. Gate on satellites and hAcc (this project uses ≥ 6 sats and ≤ 10 m) or set
 the origin deliberately once the receiver has settled.
+
+### MG90D servo latch (GP6)
+
+**The core bundles no Servo library** (4.6.0 ships only MRI, PDM, SPI,
+Scheduler, ThreadDebug, USBHID, USBMSD, Wire) — install **Servo** from the
+Library Manager. It declares `mbed_rp2040` and ships an mbed backend.
+
+**Use the Servo library — it is confirmed working here.** `mbed::PwmOut` is
+**untested**, not known-broken. It was tried first and the servo did not move,
+and a previous revision of this file concluded `PwmOut` does not drive the pin.
+That was wrong: the servo was faulty, and a replacement moved under the library
+and under a raw bit-bang on the first try. `PwmOut` has never been tried
+against a working servo. If you want it, test it — with `servo_smoke/`'s
+bit-bang phase as the control.
+
+**The lesson is the point.** A dead actuator makes working firmware look
+broken, and it is easy to build a convincing explanation on the wrong premise.
+Before blaming the code, swap in a known-good unit, and use a raw bit-bang —
+`digitalWrite` and `delayMicroseconds`, nothing else — to take software out of
+the question entirely.
+
+```cpp
+#include <Servo.h>
+Servo latch;
+latch.attach(6, 600, 2400);       // min/max clamp, in microseconds
+latch.writeMicroseconds(1500);
+latch.detach();                   // stops the pulse train
+```
+
+**Attach and detach are your arm and safe states.** Detached, the library's
+ticker is stopped and the pin sits low — no pulse train at all, so the servo is
+not being commanded anywhere. That is a stronger claim than "commanded to zero",
+which is not something a servo understands. Note `attach()` alone emits nothing:
+the ticker starts on the first `writeMicroseconds()`, so arming moves nothing.
+
+**If it still will not move, it is almost always power.** An MG90D wants
+4.8–6 V and pulls on the order of 700 mA stalled. On the Pico's 3V3 it may buzz,
+twitch or sit still, and the attempt browns out the board holding the actuator.
+Own supply, 220 µF across it, ground common with the Pico — without a shared
+ground the servo never sees a pulse edge at all. `servo_smoke/` in the repo
+sweeps one pin with nothing else running, which separates this from firmware in
+one flash.
+
+**It has no feedback.** You cannot read a servo's position — what you record is
+what you commanded. A stalled, stripped or unpowered servo reports exactly the
+same as a healthy one. The fix is a limit or reed switch on the latch, not more
+firmware.
+
+**Its own supply, with 220 µF.** Servo inrush is the classic cause of an
+unexplained reset mid-test, and a brown-out reboots the board that is holding
+the actuator.
+
+### LS3040 buzzer (GP7)
+
+**Do not use `tone()` for anything long-running on this core.** It works, and it
+leaks. `Tone::stop()` does `pin = 0` — nulling the `DigitalOut` *pointer* rather
+than writing the pin low — so the destructor's `delete pin` frees nothing and
+every `tone()` call leaks one `DigitalOut`. A locator beeping once a second
+leaks for exactly as long as the vehicle is lost. It can also leave the pin
+HIGH, so a piezo sits with DC across it after the beep should have ended.
+
+Do what `tone()` does, with the object allocated once:
+
+```cpp
+mbed::DigitalOut *buz = new mbed::DigitalOut(digitalPinToPinName(7));
+mbed::Ticker      tick;
+void toggle(){ *buz = !*buz; }
+tick.attach(mbed::callback(toggle), std::chrono::microseconds(500000UL / 4000));
+tick.detach();  *buz = 0;      // silent, and explicitly low
+```
+
+Note the mechanism: `DigitalOut` plus a `Ticker`. The Servo library's mbed
+backend does the same, and so does the core's own `tone()`. That is a pattern
+in the code, not a verdict on the hardware — software timing works on any pin,
+where the PWM peripheral is tied to a slice. Nobody here has shown the PWM
+peripheral misbehaving.
+
+**Patterns belong in a step table advanced from the loop**, never `delay()`.
+A buzzer that blocks costs you samples.
+
+**A piezo on 3V3 is quiet.** Audible on a bench, not across a field. Drive it
+through an NPN or a MOSFET from a higher rail for recovery use.
 
 ### RFM95W
 
