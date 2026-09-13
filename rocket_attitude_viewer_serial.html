@@ -140,6 +140,32 @@ button[disabled]{opacity:.4;cursor:not-allowed;box-shadow:none}
 .depmet{font:10px/1.4 var(--f-mono);padding:2px 6px;border-radius:3px;min-width:44px;text-align:center}
 .depmet.yes{background:rgba(63,107,69,.18);color:var(--ok)}
 .depmet.no{background:rgba(23,28,25,.07);opacity:.5}
+/* A condition row on a phone.  As a wrapping flex row it came apart: two
+   104px value spans and a 74px number input cannot share a 360px screen, so
+   the controls spilled one per line and the remove button ended up alone on a
+   row of its own, stretched across the width.  A grid gives each control a
+   named place, and the layout stops depending on how wide the parameter names
+   happen to be.  Scoped to .depcond -- the generated rows -- because the
+   static row below them holds different controls entirely. */
+@media (max-width:560px){
+  .deprow.depcond{
+    display:grid;align-items:center;gap:5px 6px;
+    grid-template-columns:auto minmax(0,1fr) auto auto;
+    grid-template-areas:
+      "en   param param param"
+      "cmp  val   unit  act"
+      "live live  live  met";
+    padding-bottom:7px;margin-bottom:7px;
+    border-bottom:1px dashed var(--rule-soft)}
+  .deprow.depcond>.depen{grid-area:en;justify-self:start}
+  .deprow.depcond>.depparam{grid-area:param;width:100%;min-width:0}
+  .deprow.depcond>.depcmp{grid-area:cmp}
+  .deprow.depcond>.depnum{grid-area:val;width:100%;min-width:0}
+  .deprow.depcond>.depunit{grid-area:unit}
+  .deprow.depcond>.deplive{grid-area:live;min-width:0}
+  .deprow.depcond>.depmet{grid-area:met;justify-self:end}
+  .deprow.depcond>.depdel{grid-area:act;justify-self:end}
+}
 .depbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:10px 0 0;
   padding-top:10px;border-top:1px solid var(--rule-soft)}
 .depverdict{font:11px/1.4 var(--f-mono);flex:1;min-width:200px}
@@ -149,13 +175,32 @@ button[disabled]{opacity:.4;cursor:not-allowed;box-shadow:none}
 /* board command group */
 .cmdgroup{display:flex;gap:6px;align-items:center}
 .cmdlabel{font-size:10px;letter-spacing:.08em;text-transform:uppercase;opacity:.55}
-/* stage tabs */
-.stagetabs{position:absolute;top:8px;right:10px;display:flex;gap:4px;z-index:3}
+/* Stage header: the label and the tabs, sharing one strip.
+   They used to be two independent overlays -- the label pinned top-left, the
+   tabs top-right -- which is fine until the label is long and the screen is
+   narrow.  On a phone "Trajectory - altitude measured, horizontal from GPS"
+   ran straight underneath the tab row and neither could be read.  One flex
+   container means they can never occupy the same pixels: side by side while
+   there is room, stacked when there is not. */
+.stagehead{
+  position:absolute;left:14px;right:10px;top:8px;z-index:3;
+  display:flex;flex-wrap:wrap;gap:6px 10px;
+  align-items:flex-start;justify-content:space-between;
+  pointer-events:none}
+.stagetabs{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end;
+  pointer-events:auto}
 .stagetabs .tab{
   font-size:10px;letter-spacing:.06em;text-transform:uppercase;
   padding:4px 9px;border-radius:3px;opacity:.62}
 .stagetabs .tab.on{opacity:1;border-color:var(--ink)}
-@media (max-width:560px){ .stagetabs{top:6px;right:8px} .stagetabs .tab{padding:3px 7px} }
+/* Stacked, tabs on top: they are the half you touch, so they keep the
+   predictable position and the label takes the line underneath. */
+@media (max-width:560px){
+  .stagehead{left:10px;right:8px;top:6px;gap:4px}
+  .stagetabs{order:0;width:100%;justify-content:flex-start}
+  .stagetabs .tab{padding:3px 7px}
+  .stage-label{order:1;flex:0 0 100%;padding-top:0}
+}
 /* Telemetry has stopped arriving. Dimming the numbers is the whole point: a
    frozen readout at full contrast is indistinguishable from a vehicle sitting
    perfectly still, and that is the one confusion this display must never
@@ -173,7 +218,7 @@ body.stale footer#raw{opacity:.42}
 #view{display:block;width:100%;height:100%}
 
 .stage-label{
-  position:absolute;left:14px;top:12px;
+  flex:1 1 auto;min-width:0;padding-top:5px;
   font-family:var(--f-disp);font-size:11px;letter-spacing:.18em;
   text-transform:uppercase;color:#5C665F;pointer-events:none;
 }
@@ -238,15 +283,15 @@ footer{
       <button id="btnConnect" class="primary">Connect board</button>
       <button id="btnV" disabled>Toggle stream</button>
       <span class="cmdgroup"><span class="cmdlabel">Board</span>
-        <button id="cmdZ" disabled title="Re-zero ground pressure to here (blocks ~1 s)">Zero baro</button>
-        <button id="cmdB" disabled title="Re-measure gyro bias - hold the board still (blocks ~1.5 s)">Gyro bias</button>
+        <button id="cmdZ" disabled title="Re-zero ground pressure (~1 s)">Zero baro</button>
+        <button id="cmdB" disabled title="Re-measure gyro bias - hold still (~1.5 s)">Gyro bias</button>
         <button id="cmdR" disabled title="Reset the peak trackers, board and display">Reset peaks</button>
-        <button id="cmdG" disabled title="Print GPS status into the raw line">GPS status</button>
+        <button id="cmdG" disabled title="Print GPS status">GPS status</button>
       </span>
       <button id="btnDemo">Run demo</button>
       <button id="btnZero">Level here</button>
       <button id="btnSmooth">Smoothing: on</button>
-      <button id="btnGate" title="The pad datum is only taken from a fix that clears a quality bar. Turn this off to accept whatever the receiver is offering.">Fix gate: on</button>
+      <button id="btnGate" title="Take the pad datum only from a fix that clears the quality bar">Fix gate: on</button>
       <div class="status"><span class="dot" id="dot"></span><span id="statusText">Not connected</span></div>
     </div>
   </header>
@@ -256,16 +301,17 @@ footer{
   <div class="body">
     <div class="stage">
       <canvas id="view"></canvas>
-      <div class="stagetabs">
-        <button id="tabAtt" class="tab on">Attitude</button>
-        <button id="tabTraj" class="tab">Trajectory</button>
-        <button id="tabPad" class="tab" title="Re-datum the pad on the next fix worth trusting">Set pad</button>
-        <button id="tabClear" class="tab" title="Discard the recorded path">Clear</button>
+      <div class="stagehead">
+        <div class="stage-label">Elevation &mdash; live</div>
+        <div class="stagetabs">
+          <button id="tabAtt" class="tab on">Attitude</button>
+          <button id="tabTraj" class="tab">Trajectory</button>
+          <button id="tabPad" class="tab" title="Re-datum the pad on the next good fix">Set pad</button>
+          <button id="tabClear" class="tab" title="Discard the recorded path">Clear</button>
+        </div>
       </div>
-      <div class="stage-label">Elevation &mdash; live</div>
       <div class="hint" id="hint">
         Close the Arduino Serial Monitor first &mdash; only one program can hold the port.
-        Connecting sends <code>v</code> automatically; <code>Toggle stream</code> sends it again.
       </div>
     </div>
 
@@ -343,13 +389,10 @@ footer{
     </div>
     <div id="depBody" hidden>
       <p class="depnote">
-        <b>Bench test harness &mdash; not the flight deployment path.</b>
-        Conditions are evaluated here, in the browser, so thresholds can be
-        changed without a reflash. That is exactly why it must not fly: flight
-        deployment belongs in the state machine on the board and must never
-        depend on a link (&sect;2.3, &sect;5.4). What this is for is finding the
-        numbers that later get compiled into it &mdash; use <b>Export</b> when
-        you have them. Keep hands clear of the latch whenever it reads ARMED.
+        <b>Bench harness &mdash; not the flight path.</b>
+        Keep hands clear while it reads ARMED.
+        Arming lapses 3&nbsp;s after this page stops sending heartbeats, so
+        locking the phone disarms it.
       </p>
 
       <div id="depRows"></div>
@@ -398,7 +441,7 @@ footer{
       <button id="conToggle" class="ctab" aria-expanded="false">&#9656; Serial monitor</button>
       <span class="conmeta" id="conMeta">0 lines</span>
       <span class="congrow"></span>
-      <button id="conV" class="ctab" title="Include the 25 Hz telemetry frames. Off by default -- they drown everything else.">V frames: off</button>
+      <button id="conV" class="ctab" title="Include the telemetry frames - they drown everything else">V frames: off</button>
       <button id="conCopy" class="ctab">Copy</button>
       <button id="conClear" class="ctab">Clear</button>
     </div>
@@ -829,8 +872,11 @@ const tel={
   // are different states and the display distinguishes them.
   hg:null, hgPeak:0, fix:null, sats:0, lat:0, lon:0, hacc:null,
   // Servo latch as the BOARD reports it, not as this page believes it to be.
-  // srv: -1 no latch on this source, 0 safe, 1 armed, 2 fired.
-  srv:null, srvus:0
+  // srv: -1 no latch on this source, 0 safe, 1 armed, 2 fire commanded.
+  // lsw is the only MEASURED one: a switch on the mechanism itself.
+  // -1 none fitted, 0 released, 1 engaged. Without it "fired" means
+  // "commanded to fire", and a stalled servo reads the same as a healthy one.
+  srv:null, srvus:0, lsw:null
 };
 let rateWin=[];
 
@@ -894,6 +940,7 @@ function ingest(parts){
     tel.hacc = (n.length>=15) ? n[14] : null;
     tel.srv   = (n.length>=17) ? n[15] : null;
     tel.srvus = (n.length>=17) ? n[16] : 0;
+    tel.lsw   = (n.length>=18) ? n[17] : null;
     traj.add(tel.alt, tel.fix, tel.lat, tel.lon, tel.hacc, tel.sats, trajStamp());
   }else{
     tel.fix=null; tel.hacc=null;
@@ -1077,7 +1124,7 @@ document.getElementById('btnConnect').addEventListener('click',async()=>{
 
 document.getElementById('btnV').addEventListener('click',async()=>{
   const ok=await sendChar('v');
-  if(!ok) showBanner('Could not write to the port. Disconnect and connect again.');
+  if(!ok) showBanner('Could not write to the port. Disconnect and reconnect.');
   else { nagged=false; lastFrameAt=0; connectedAt=performance.now(); }
 });
 
@@ -1555,13 +1602,13 @@ function drawTrajLegend(w,h,step){
            'alt '+alt.toFixed(1)+' m  (measured)',
            traj.origin==null
              ? (traj.gateOn
-                 ? 'no pad datum — gate wants '+traj.minSats+'+ sats and \u00B1'+traj.maxHAcc+' m'
-                 : 'no pad datum — waiting for any 2D fix')
+                 ? 'no pad datum — needs '+traj.minSats+'+ sats, \u00B1'+traj.maxHAcc+' m'
+                 : 'no pad datum — needs a 2D fix')
              : (gnd==null?'ground —':'ground '+gnd.toFixed(1)+' m from pad')];
-  if(!traj.gateOn) L.push('FIX GATE OFF — datum may come from an unvetted fix');
-  if(traj.pendingPad) L.push('set pad: waiting for the next usable fix');
-  if(unlocked) L.push('dashed red = no GPS lock, horizontal frozen');
-  if(poor) L.push('faded blue = fix worse than \u00B1'+traj.maxHAcc+' m');
+  if(!traj.gateOn) L.push('fix gate OFF — datum unvetted');
+  if(traj.pendingPad) L.push('set pad: waiting for a fix');
+  if(unlocked) L.push('dashed red = no lock');
+  if(poor) L.push('faded blue = worse than \u00B1'+traj.maxHAcc+' m');
   /* A backing panel, because two other things share this corner: the stage's
      HTML hint overlay is anchored to the same bottom edge, and the ground grid
      runs underneath. Legend text sitting directly on either is unreadable, and
@@ -1863,13 +1910,14 @@ function depRenderRows(){
   host.innerHTML='';
   depConds.forEach(function(c,i){
     const row=document.createElement('div');
-    row.className='deprow';
+    row.className='deprow depcond';
 
     const en=document.createElement('input');
-    en.type='checkbox'; en.checked=!!c.on;
+    en.type='checkbox'; en.checked=!!c.on; en.className='depen';
     en.addEventListener('change',function(){ c.on=en.checked; depSave(); });
 
     const ps=document.createElement('select');
+    ps.className='depparam';
     for(const k in DEP_PARAMS){
       const o=document.createElement('option');
       o.value=k; o.textContent=DEP_PARAMS[k].label;
@@ -1879,6 +1927,7 @@ function depRenderRows(){
     ps.addEventListener('change',function(){ c.param=ps.value; depSave(); depRenderRows(); });
 
     const cs=document.createElement('select');
+    cs.className='depcmp';
     [['ge','≥'],['le','≤']].forEach(function(pair){
       const o=document.createElement('option');
       o.value=pair[0]; o.textContent=pair[1];
@@ -1888,21 +1937,21 @@ function depRenderRows(){
     cs.addEventListener('change',function(){ c.cmp=cs.value; depSave(); });
 
     const vi=document.createElement('input');
-    vi.type='number'; vi.step='any'; vi.value=c.val;
+    vi.type='number'; vi.step='any'; vi.value=c.val; vi.className='depnum';
     vi.addEventListener('input',function(){ c.val=parseFloat(vi.value); depSave(); });
 
     const unit=document.createElement('span');
-    unit.className='depval'; unit.style.minWidth='0';
+    unit.className='depval depunit'; unit.style.minWidth='0';
     unit.textContent=DEP_PARAMS[c.param]?DEP_PARAMS[c.param].unit:'';
 
     const live=document.createElement('span');
-    live.className='depval'; live.id='depLive'+i;
+    live.className='depval deplive'; live.id='depLive'+i;
 
     const met=document.createElement('span');
     met.className='depmet no'; met.id='depMet'+i; met.textContent='—';
 
     const del=document.createElement('button');
-    del.className='ctab'; del.textContent='×';
+    del.className='ctab depdel'; del.textContent='×';
     del.title='remove this condition';
     del.addEventListener('click',function(){ depConds.splice(i,1); depSave(); depRenderRows(); });
 
@@ -2006,7 +2055,7 @@ function depEvaluate(now){
   const vd=document.getElementById('depVerdict');
   if(vd){
     let t;
-    if(tel.srv===2)         t='latch already FIRED — re-latch before testing again';
+    if(tel.srv===2)         t='latch already fired — re-latch before testing again';
     else if(!active.length) t='no conditions enabled';
     else if(!pass)          t='conditions not met';
     else if(!depArmed)      t='conditions MET — latch is safe, nothing will fire';
@@ -2024,12 +2073,21 @@ function depEvaluate(now){
   const st=document.getElementById('depState');
   if(st){
     let t;
+    // srv===2 means the board COMMANDED a release. Whether the mechanism
+    // actually moved is a different question, and only the switch answers it:
+    // no switch, no confirmation, and the label must not imply one.
+    const sw = (tel.lsw==null || tel.lsw<0) ? null : (tel.lsw===0);
     if(tel.srv==null)     t='latch: no data';
     else if(tel.srv<0)    t='latch: not on this source';
-    else if(tel.srv===2)  t='latch: FIRED @ ' + tel.srvus + ' µs';
+    else if(tel.srv===2)  t='latch: ' + (sw===null ? 'FIRE COMMANDED (unconfirmed)'
+                                       : sw ? 'RELEASE CONFIRMED'
+                                            : 'FIRED BUT STILL ENGAGED')
+                            + ' @ ' + tel.srvus + ' µs';
     else if(tel.srv===1)  t='latch: ARMED @ ' + (tel.srvus||'idle') + (tel.srvus?' µs':'');
     else                  t='latch: safe';
     if(st.textContent!==t) st.textContent=t;
+    // Red for armed, for a commanded fire, and emphatically for a fire the
+    // switch says did not happen.
     st.classList.toggle('armed', tel.srv===1 || tel.srv===2);
   }
 }

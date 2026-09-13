@@ -6,6 +6,139 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ---
 
+## [0.3.2] — 2026-09-13
+
+Four things the v0.3.1 notes listed as unresolved, the outdoor GPS test that
+had been open since v0.2.0, and three of the four long-standing bench items.
+
+### Added
+
+- **`!hgcal` — a six-position ADXL375 zero-g offset trim.** The part has
+  hardware offset registers (`OFSX`/`OFSY`/`OFSZ`) applied before the data
+  reaches the output registers; the Adafruit library does not expose them but
+  does expose `writeRegister()`. Rest the board on each of its six faces and
+  capture one at a time, and gravity cancels out of each axis's up/down
+  average, leaving the bias. `apply` **adds** its correction to whatever is
+  already in the register, having measured the residual with that value
+  applied — so the datasheet's 196 mg/LSB is a starting guess rather than a
+  dependency, and a second pass squares away however wrong it is. Not
+  persistent: it prints three `HG_TRIM_*` constants to paste and re-flash,
+  applied and read back at boot like every other setting. Drivable from a phone
+  (`hgcal zup`), since the calibration wants both hands on the board.
+- **The I²C scan measures the `0x7E` phantom instead of mentioning it.** Every
+  address is probed eight times at 100 kHz and again at 400 kHz, with the hit
+  rate printed beside it. 8/8 at both speeds is a device; intermittent, or
+  present only at 400 kHz, is the master reading a floating line as an
+  acknowledgement — and the scan now says so, along with what to change. No
+  firmware can repair a marginal bus; it can stop reporting one pass as a fact.
+  Bus speed is explicit (`I2C_HZ`) rather than the core's implicit default.
+- **Latch feedback, the firmware half.** Set `LATCH_SWITCH_PIN` and every
+  commanded move is confirmed against the switch after the settle window, with
+  a failure printing `*** LATCH DID NOT RELEASE ***` and sounding the alarm.
+  The sensed state rides in telemetry as a new `lsw` field — the only measured
+  field in that line. The polarity is deliberate: closed to ground when
+  released, pulled up, so a broken wire reports a fire that did not happen
+  rather than certifying one that did.
+
+### Changed
+
+- **Nothing claims the latch fired when all it knows is that it asked.** With
+  no switch fitted the board logs `SERVO FIRE COMMANDED ... (no feedback - not
+  confirmed)` and the viewer reads `latch: FIRE COMMANDED (unconfirmed)`. With
+  one fitted it reads `RELEASE CONFIRMED`, or `FIRED BUT STILL ENGAGED`.
+- **The viewer says less.** The deployment panel's standing explanation — why
+  the harness is not the flight path, the section references, the argument for
+  keeping deployment on the board — is eleven lines shorter and now carries
+  only what changes an action: keep hands clear while ARMED, and arming lapses
+  3 s after the page stops sending heartbeats. Tooltips, the trajectory legend
+  and the connection banners are trimmed the same way. The reasoning was
+  already in the documentation, which is where it belongs.
+
+### Fixed
+
+- **The ground station now forwards every frame, once, instead of resending
+  the latest one on a timer.** Each frame carries a sequence number and each
+  connected browser tracks which one it has been sent — the same rule board
+  messages already used. Before this, a stream slept one frame period and sent
+  whatever `latest` held, so delivery was capped at the station's own loop
+  period (`FRAME_DT` plus the time to write) and the frames produced in between
+  were never sent at all: a 25 Hz board arrived at the 23 Hz visible in the
+  v0.3.1 screenshots, and a 50 Hz radio would have been halved. A browser that
+  cannot keep up still drops frames rather than queueing them — it is sent the
+  frame that stands now, never a backlog.
+- **The 5-second diagnostics summary no longer floods a phone's console.** Its
+  GPS line went through `Out`, which tees to the wired link, so with no USB
+  host attached the board stayed in table mode and pushed one of these to every
+  phone every 5 seconds, burying the acknowledgements and refusals that are the
+  console's job. `printGpsStatus()` now takes its destination from the caller:
+  the link for `g` and `!g`, which someone asked for; USB only for the summary,
+  which nobody did.
+- **The stage label no longer runs underneath the stage tabs on a phone.** The
+  label and the tabs were independent overlays pinned to opposite corners of
+  the same strip, which collides as soon as the label is long and the screen is
+  narrow — `Trajectory — altitude measured, horizontal from GPS` sat directly
+  under the tab row. They now share one flex container: side by side with room,
+  stacked when not, tabs on top.
+- **Deployment condition rows no longer come apart when they wrap.** Two 104 px
+  value spans and a 74 px number input cannot share a 360 px screen, so the
+  controls spilled one per line and the remove button ended up alone on a row
+  of its own. Narrow screens now lay each row out as a grid with a named place
+  for every control.
+- **Constants wrapped over two lines were silently dropped from the test
+  extract**, which surfaced as the ground-station model failing to compile
+  rather than as anything to do with line length. The extractor now carries
+  continuation lines with the assignment that opens them.
+
+### Confirmed on hardware
+
+- **Commands from a phone act on the board.** The one thing v0.3.1 shipped
+  without evidence for.
+- **The GPS, outdoors.** 12 satellites at ±2.5 m, tracking a path walked on
+  foot 245 m from the pad datum — against the 5 satellites and 238 m wander
+  that an indoor sky view gave, and matching what §4.5 predicted. Every fix in
+  that track cleared the ±10 m pad-datum gate, so the path drew solid for its
+  whole length. The receiver, its antenna and the configuration are sound; the
+  remaining error is metres, which is why GPS stays a recovery aid and never a
+  deployment input.
+
+- **Stream forwarding is now testable.** The rule lives in a `StreamCursor`
+  object rather than inline in `serve_stream`, so `run_checks.py` can drive it
+  with a fake clock and no socket: every frame forwarded once per browser, the
+  current frame rather than a backlog to a slow client, independent clients,
+  keep-alive comments paced rather than one per poll, and the first frame after
+  a silence sent even when identical to the last one before it. The old
+  behaviour was wrong in a way nothing could see, because there was nothing to
+  call. Mutation-tested — restoring either the v0.3.1 resend or a queueing
+  variant fails the run.
+
+### Docs
+
+- **Outdoor GPS screenshots** in the README, §4.5 and the status report; the
+  open item asking for them is closed, and the indoor-only qualification is
+  gone from the design doc's summary.
+
+### Known, unresolved
+
+The three bench items above all now have their firmware half; what is left is
+bench work and one part.
+
+- **`!hgcal` has not been run on the hardware.** Until it is and the three
+  `HG_TRIM_*` constants are committed, the ADXL375 still reads 0.73 g at rest
+  against the LSM6's 1.01 g.
+- **The `0x7E` phantom has not been re-measured** with the new two-speed scan,
+  so whether it is intermittent, rise-time dependent, or stubbornly 8/8 at both
+  speeds is still unknown.
+- **No limit switch is fitted**, so no latch movement is confirmed by anything
+  physical. The firmware is waiting on `LATCH_SWITCH_PIN`.
+- **The latch-feedback and calibration paths are untested on hardware.**
+  Everything compiles and the offset arithmetic is straightforward, but no
+  switch has ever closed and no trim register has ever been written outside a
+  compiler.
+- **The servo stays on VBUS** by choice — the power bank lives on the flight
+  Pico, so VBUS is present.
+- **The ground station stays on its default Wi-Fi password** by choice; it is
+  published in this repository, and that network can arm the latch.
+
 ## [0.3.1] — 2026-09-11
 
 ### Added
@@ -551,7 +684,8 @@ only, and the tilt inhibit is specified but not implemented.
 
 ---
 
-[Unreleased]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/rodpauloduran/MAARE-Avionics-System/compare/v0.2.0...v0.2.1

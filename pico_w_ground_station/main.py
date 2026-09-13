@@ -72,13 +72,25 @@ except ImportError:
     PASSWORD_IS_DEFAULT = True
 CHANNEL   = 6
 PORT      = 80
-RATE_HZ   = 25                   # telemetry frames per second
+RATE_HZ   = 25                   # the SYNTHETIC producer's rate
 FRAME_DT  = 1.0 / RATE_HZ
 
 # How long the source may go quiet before this station stops forwarding frames.
 # Deliberately tighter than the viewer's own 1.5 s staleness timeout, so the
 # viewer's timer starts promptly rather than both waiting on each other.
 SOURCE_STALE_MS = 1000
+
+# How often a stream task wakes to look for a new frame.  This is not a rate
+# limit: a stream forwards each frame once, as it arrives, so the delivered
+# rate is the PRODUCER's rate and this only bounds the latency added on top.
+# Through v0.3.1 the streams slept FRAME_DT and resent whatever `latest` held,
+# which capped delivery at this station's own loop period -- FRAME_DT plus the
+# time to write -- so a 25 Hz board arrived at about 23 Hz, with the frames in
+# between simply never sent.  A 50 Hz radio would have been halved.
+STREAM_POLL   = 0.004
+# A stale source produces no frames, so the keep-alive comment needs a cadence
+# of its own rather than one per poll.
+STALE_NOTE_MS = 500
 
 # --- wired link (v0.3.1 radio stand-in) -------------------------------------
 # UART0 on GP0 (TX) / GP1 (RX), matching the flight computer's Serial1.  The
@@ -100,6 +112,13 @@ LINK_MAX_LINE   = 512            # bytes with no newline = not our framing
 # 'h': those only change what the flight computer's USB port prints.
 CMD_PLAIN       = ("arm", "safe", "fire", "latch", "srv", "hb", "bz", "z", "b", "r", "g")
 CMD_BUZ         = ("off", "chirp", "double", "locate", "alarm")
+# The ADXL375 offset trim.  It moves no actuator, and the calibration wants
+# both hands on the board -- so a phone is the natural place to drive it from.
+# 'xup'/'xdn' rather than the terminal's 'x+'/'x-': the filter below admits
+# only letters, digits and spaces, and that is not a rule worth relaxing for
+# punctuation.
+CMD_HGCAL       = ("xup", "xdn", "yup", "ydn", "zup", "zdn",
+                   "apply", "clear", "show", "status")
 CMD_MAX_LEN     = 40
 SERVO_US_MIN    = 600            # must match the flight computer's clamp
 SERVO_US_MAX    = 2400
@@ -175,6 +194,11 @@ class Telemetry:
         self.cmd_refused = 0
         self.boot = time.ticks_ms()
         self.frames = 0
+        # Frames carry sequence numbers for the same reason messages do: each
+        # connected browser must be sent each frame ONCE.  Without this the
+        # only question a stream could ask was "what is the latest line", which
+        # cannot tell a new frame from the previous one standing unchanged.
+        self.frame_seq = 0
         self.latest = ("V,0.0000,0.0000,1.0000,0.00,0.00,0.00,0.000,0.000,0"
                        ",1.00,0,0,0.0000000,0.0000000,-1.00,-1,0")
         # When the SOURCE last produced a frame -- not when one was last sent
@@ -339,6 +363,8 @@ class Telemetry:
             return "!" + w[0], None
         if len(w) == 2 and w[0] == "buz" and w[1] in CMD_BUZ:
             return "!buz " + w[1], None
+        if len(w) == 2 and w[0] == "hgcal" and w[1] in CMD_HGCAL:
+            return "!hgcal " + w[1], None
         if len(w) == 2 and w[0] == "us" and w[1].isdigit():
             n = int(w[1])
             if SERVO_US_MIN <= n <= SERVO_US_MAX:
@@ -577,6 +603,7 @@ class Telemetry:
         model today, the radio packet reader later -- goes through here, so
         the freshness timestamp cannot be forgotten by a new producer."""
         self.latest = line
+        self.frame_seq += 1
         self.updated = time.ticks_ms()
 
     def stale(self):
@@ -588,6 +615,60 @@ class Telemetry:
     def frame(self):
         """Most recent wire line. Consumers call this; they never advance."""
         return self.latest
+
+
+class StreamCursor:
+    """How far one connected browser has got: which frame it has been sent,
+    which messages, and when it was last told the source is quiet.
+
+    This is the forwarding rule, and it lives out here rather than inside
+    serve_stream so that it can be driven by a test with a fake clock and no
+    socket.  The rule it replaces -- "sleep a frame, send whatever `latest`
+    holds" -- was wrong in a way no test could see, because there was nothing
+    to call: it delivered at this station's loop rate instead of the
+    producer's, and silently dropped the frames in between.
+    """
+
+    def __init__(self, tel, now):
+        # Start one behind, so a phone that connects is sent the frame standing
+        # now rather than waiting for the source to produce the next one.
+        self.last_frame = tel.frame_seq - 1
+        # And far enough behind on messages to see the recent past: the boot
+        # banner, the last few acknowledgements.
+        self.last_msg = tel.msg_seq - MSG_REPLAY
+        self.stale_note = now
+
+    def pending(self, tel, now):
+        """The SSE chunks this client is owed, in order. [] means nothing."""
+        out = []
+        # Messages go out whether or not telemetry is stale: while the board is
+        # blocked zeroing the barometer, its progress text is exactly what the
+        # phone should be showing.
+        for seq, text in tel.msgs_since(self.last_msg):
+            out.append(("event: msg\ndata: %s\n\n" % text).encode())
+            self.last_msg = seq
+        if tel.stale():
+            # An SSE comment, not a data frame: EventSource ignores comment
+            # lines, so the connection and its retry timer stay alive while the
+            # viewer's own staleness timeout fires.  Repeating the last frame
+            # here would defeat that timeout entirely -- frames would keep
+            # arriving, they would just all say the same thing, which is
+            # precisely how "radio silent" ends up looking like "sitting still".
+            if time.ticks_diff(now, self.stale_note) >= 0:
+                out.append(b": stale\n\n")
+                self.stale_note = time.ticks_add(now, STALE_NOTE_MS)
+            # The frame standing when the source died is not news, but it is
+            # not wrong either.  Forget it, so that whatever arrives when the
+            # source comes back is sent even if it is identical to it.
+            self.last_frame = tel.frame_seq
+        elif tel.frame_seq != self.last_frame:
+            # The frame that stands NOW -- not every frame missed while this
+            # socket was blocked.  A phone that cannot keep up should fall
+            # behind by dropping frames, never by queueing them; the drain in
+            # serve_stream is the back pressure that makes that happen.
+            self.last_frame = tel.frame_seq
+            out.append(("data: %s\n\n" % tel.frame()).encode())
+        return out
 
 
 tel = Telemetry()
@@ -726,30 +807,15 @@ async def serve_stream(w):
     # tell the client how fast to expect frames
     w.write(("retry: 1000\n\nevent: hello\ndata: %d\n\n" % RATE_HZ).encode())
     await w.drain()
-    # A phone that connects late still sees the recent past -- the boot
-    # banner, the last few acknowledgements -- rather than a blank console.
-    last_msg = tel.msg_seq - MSG_REPLAY
+    cur = StreamCursor(tel, time.ticks_ms())
     try:
         while True:
-            # Messages go out whether or not telemetry is stale: while the
-            # board is blocked zeroing the barometer, its progress text is
-            # exactly what the phone should be showing.
-            for seq, text in tel.msgs_since(last_msg):
-                w.write(("event: msg\ndata: %s\n\n" % text).encode())
-                last_msg = seq
-            if tel.stale():
-                # Source has gone quiet. Send an SSE comment instead of a data
-                # frame: EventSource ignores comment lines, so the connection
-                # and its retry timer stay alive while the viewer's own
-                # staleness timeout fires. Repeating the last frame here would
-                # defeat that timeout entirely -- frames would keep arriving,
-                # they would just all say the same thing, which is precisely
-                # how "radio silent" ends up looking like "sitting still".
-                w.write(b": stale\n\n")
-            else:
-                w.write(("data: %s\n\n" % tel.frame()).encode())
-            await w.drain()
-            await asyncio.sleep(FRAME_DT)
+            chunks = cur.pending(tel, time.ticks_ms())
+            if chunks:
+                for c in chunks:
+                    w.write(c)
+                await w.drain()
+            await asyncio.sleep(STREAM_POLL)
     except (OSError, AttributeError):
         pass                      # client went away
     finally:
