@@ -65,13 +65,27 @@ def load_model():
     k0 = src.index("class Telemetry")
     k1 = src.index("tel = Telemetry()")
     keep = re.compile(r"^([A-Z_][A-Z0-9_]*\s*=|#|\s*$)")
-    consts = chr(10).join(ln for ln in src[c0:k0].splitlines() if keep.match(ln))
+    # A kept line that opens a bracket carries its continuation lines with it.
+    # Without this, a constant wrapped over two lines is extracted as its first
+    # half and the whole model fails to compile -- which is a confusing way to
+    # find out that a tuple got too long for one line.
+    picked, depth = [], 0
+    for ln in src[c0:k0].splitlines():
+        if depth or keep.match(ln):
+            picked.append(ln)
+            depth += ln.count("(") - ln.count(")")
+            depth += ln.count("[") - ln.count("]")
+            depth += ln.count("{") - ln.count("}")
+            if depth < 0:
+                depth = 0
+    consts = chr(10).join(picked)
     body = consts + chr(10) * 2 + src[k0:k1]
 
     clock = {"t": 0}
     fake_time = types.ModuleType("time")
     fake_time.ticks_ms = lambda: clock["t"]
     fake_time.ticks_diff = lambda a, b: a - b
+    fake_time.ticks_add = lambda t, d: t + d
 
     ns = {"time": fake_time, "math": math}
     exec(compile(body, "main.py<extract>", "exec"), ns)
@@ -243,6 +257,7 @@ def check_producer(ns, clock):
         ("!us%201500", "!us 1500"), ("us+1500", "!us 1500"),
         ("!pos 1000 2000", "!pos 1000 2000"),
         ("!buz locate", "!buz locate"), ("!beep 4000 200", "!beep 4000 200"),
+        ("!hgcal zup", "!hgcal zup"), ("hgcal apply", "!hgcal apply"),
         ("z", "!z"), ("!g", "!g"), ("!hb", "!hb"), ("!fire", "!fire"),
     ]:
         got, why = up.prepare_command(raw)
@@ -259,6 +274,8 @@ def check_producer(ns, clock):
         ("!arm now", "an extra argument"),
         ("!arm%0a!fire", "a second command smuggled after a newline"),
         ("!buz siren", "an unknown buzzer pattern"),
+        ("!hgcal z+", "a punctuation form the filter must not admit"),
+        ("!hgcal sideways", "an unknown calibration position"),
         ("!beep 5 5", "a beep out of range"),
         ("", "an empty command"),
         ("!" + "a" * 60, "an over-long command"),
@@ -276,7 +293,7 @@ def check_producer(ns, clock):
     check(up.cmd_refused == before + 1, "the synthetic-mode refusal was not counted")
     up.set_mode("uart")
     print("  uplink: allowlist rebuilds commands, refuses %d malformed or "
-          "out-of-range forms, refuses all while synthetic" % 14)
+          "out-of-range forms, refuses all while synthetic" % 16)
 
     # ---- board messages: forwarded, fanned out, capped ------------------
     mm = Telemetry()
@@ -306,6 +323,76 @@ def check_producer(ns, clock):
     check(len(mm.msgs) <= ns["MSG_KEEP"], "the message log grew past its cap")
     print("  messages: forwarded verbatim, fanned out once per client, "
           "withheld while synthetic, capped")
+
+    # ---- what each connected browser is actually sent --------------------
+    # The regression this exists to catch: through v0.3.1 a stream resent
+    # whatever `latest` held once per FRAME_DT, so delivery was capped at this
+    # station's loop rate and the frames in between were never sent at all.
+    Cursor = ns["StreamCursor"]
+    data = lambda cs: [c for c in cs if c.startswith(b"data: ")]
+
+    sc = Telemetry()
+    clock["t"] = 10000
+    cur = Cursor(sc, clock["t"])
+
+    # A browser that has just connected is owed the frame standing now.
+    check(len(data(cur.pending(sc, clock["t"]))) == 1,
+          "a newly connected browser was not sent the standing frame")
+    check(cur.pending(sc, clock["t"]) == [],
+          "the standing frame was sent twice with nothing new produced")
+
+    # Every frame the producer makes is forwarded, once each.
+    sent = 0
+    for k in range(40):
+        clock["t"] += 10                       # 100 Hz -- far above RATE_HZ
+        sc.accept_line(frames[k].encode())
+        sent += len(data(cur.pending(sc, clock["t"])))
+        check(cur.pending(sc, clock["t"]) == [], "frame %d was sent twice" % k)
+    check(sent == 40, "40 frames produced, %d forwarded" % sent)
+
+    # A browser slower than the producer falls behind by DROPPING, never by
+    # queueing: it gets the frame that stands now, not the five it missed.
+    for k in range(40, 45):
+        clock["t"] += 10
+        sc.accept_line(frames[k].encode())
+    chunks = data(cur.pending(sc, clock["t"]))
+    check(len(chunks) == 1, "a slow client was sent %d frames at once" % len(chunks))
+    check(frames[44].encode() in chunks[0],
+          "a slow client was sent a stale frame rather than the current one")
+
+    # Two browsers are independent: neither consumes the other's frames.
+    a, b = Cursor(sc, clock["t"]), Cursor(sc, clock["t"])
+    clock["t"] += 10
+    sc.accept_line(frames[50].encode())
+    check(len(data(a.pending(sc, clock["t"]))) == 1
+          and len(data(b.pending(sc, clock["t"]))) == 1,
+          "two browsers did not each receive the frame")
+
+    # A quiet source: comments to hold the connection open, no data frames,
+    # and not one comment per poll.
+    clock["t"] += ns["SOURCE_STALE_MS"] + 100
+    check(sc.stale(), "the source did not go stale when the wire went quiet")
+    notes = polls = 0
+    for _ in range(60):                        # 60 polls x 4 ms
+        clock["t"] += int(ns["STREAM_POLL"] * 1000)
+        out = cur.pending(sc, clock["t"])
+        check(data(out) == [], "a frame was forwarded from a stale source")
+        notes += out.count(b": stale\n\n")
+        polls += 1
+    span = polls * ns["STREAM_POLL"] * 1000
+    check(notes <= span / ns["STALE_NOTE_MS"] + 1,
+          "%d keep-alive comments in %d ms, expected about %d"
+          % (notes, span, span / ns["STALE_NOTE_MS"]))
+    check(notes >= 1, "a stale source sent no keep-alive at all")
+
+    # Coming back from stale, the first frame is sent even if it is identical
+    # to the one that was standing when the source died.
+    clock["t"] += 10
+    sc.accept_line(frames[44].encode())        # the same line as before
+    check(len(data(cur.pending(sc, clock["t"]))) == 1,
+          "the first frame after a silence was suppressed as a duplicate")
+    print("  streams: every frame forwarded once per browser, latest-not-queued "
+          "when slow, independent clients, keep-alive paced while stale")
     return frames
 
 

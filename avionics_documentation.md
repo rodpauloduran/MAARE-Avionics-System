@@ -1,6 +1,6 @@
 # Water Rocket Avionics System — Design Documentation
 
-**v0.3.1 · September 2026**
+**v0.3.2 · September 2026**
 Mapúa University (Intramuros)
 
 > **What is built.** All four I²C sensors are now on the flight computer — the
@@ -8,11 +8,13 @@ Mapúa University (Intramuros)
 > and the bench diagnostics sketch drives all of them (§13.2). **All four are
 > now confirmed on hardware** — every device answers on the bus and every
 > configurable one reports its settings back correctly at boot. Two
-> qualifications: the ADXL375's zero-g offset is untrimmed (§4.4), and the GPS
-> has been given only an indoor sky view, so it holds a fix but not an accurate
-> one (§4.5). The ground segment — a 3D attitude viewer
+> qualification remains: the ADXL375's zero-g offset is untrimmed — `!hgcal`
+> implements the correction but has not been run on the bench (§4.4). The
+> GPS has now been **signed off outdoors** — 12 satellites at ±2.5 m, tracking a
+> path walked on foot (§4.5). The ground segment — a 3D attitude viewer
 > (§6.7) and a Pico W ground station serving it over its own Wi-Fi (§6.5) —
-> works on synthetic telemetry. Not connected: radio link, deployment
+> runs on live telemetry from the flight computer over a wired link (§6.5),
+> and is fully usable from a phone. Not connected: radio link, deployment
 > hardware, arming interlock, buzzer, airframe. This document specifies the
 > whole system; treat anything outside §13.2 and §6.5 as design intent rather
 > than description.
@@ -379,6 +381,40 @@ So the rest check is deliberately loose: it flags only readings outside roughly
 ≈0, and an ADXL345 in this footprint reads about 12× low (≈0.08 g). Anything
 inside that band is reported as offset, with the delta against the LSM6 shown.
 
+**The part can correct it itself — `!hgcal` (v0.3.2).** `OFSX`/`OFSY`/`OFSZ` are
+hardware trim registers applied to the data *before* it reaches the output
+registers, so a corrected reading costs nothing at runtime. The Adafruit
+library does not expose them; it does expose `writeRegister()`.
+
+Why six positions. One reading cannot separate offset from gravity: an axis
+reading 0.73 g might be a true 1 g with a −0.27 g bias, or a true 0.73 g held
+at an angle. Point the axis up, then down, and gravity cancels out of the
+average:
+
+```
+up = +1 + bias      down = −1 + bias      (up + down) / 2 = bias
+```
+
+which needs no reference more accurate than knowing which way is down. Rest the
+board on each of its six faces, capturing one at a time — `!hgcal z+`,
+`!hgcal z-`, and so on, or `zup`/`zdn` from a phone, where the ground station's
+allowlist admits only letters and digits. `!hgcal apply` then computes each
+bias and writes the registers.
+
+**The datasheet's 196 mg/LSB is a starting guess, not a dependency.** `apply`
+*adds* its correction to whatever is already in the register, having measured
+the residual with that value applied — a fixed-point iteration. Run it twice
+and the error falls by the square of however wrong that constant is. The
+residual magnitude is printed after every pass so convergence is visible
+rather than assumed.
+
+Two things it cannot do. **Scale error survives**: `(up − down) / 2` should be
+1.000 and is reported, but the offset registers cannot correct a gain error.
+And it is **not persistent** — an RP2040 has no EEPROM, and writing flash at
+runtime to store three bytes is not a trade worth making. `apply` prints three
+`const int8_t HG_TRIM_*` lines ready to paste; re-flash and the trim is
+permanent, applied and read back at boot like every other setting (§4.3).
+
 **Trimming the offset out is an open item.** It needs a per-axis calibration
 against a known orientation; a magnitude check cannot separate offset from
 scale error, and the offset is per-axis while |a| is not. Until then, treat the
@@ -447,6 +483,30 @@ the worst one you will ever get: cold start, fewest satellites, worst geometry.
 Anything measured from it inherits that error silently, and every later, better
 fix appears to *move* — which is precisely the 238 m above. Gate the datum on
 satellites and `hAcc`, or set it deliberately once the fix has settled.
+
+**Confirmed outdoors (v0.3.2).** Taken outside and walked around, the same
+receiver held **12 satellites at ±2.5 m** and tracked a path 245 m from the pad
+datum. That is the predicted outcome rather than a surprise — the indoor 238 m
+was a geometry problem, and geometry is what open sky fixes — but it does
+settle the question the bench could not: the part, the antenna and the
+configuration are all sound, and the accuracy figure the receiver reports is
+one the display can act on. Every fix in that track cleared the ±10 m gate, so
+the path drew solid for its whole length.
+
+<p align="center">
+<img src="docs/images/phone-gps-readouts.jpg" width="45%" alt="Readouts on a phone outdoors: GPS 3D fix, 12 satellites, accuracy plus or minus 2.5 m, 244.9 m from the pad">
+<img src="docs/images/phone-gps-walk.jpg" width="45%" alt="The trajectory tab showing a path walked on foot: a solid blue track curving away from the pad marker across the ground grid">
+</p>
+
+*The same receiver outdoors, walked around on foot. **12 satellites and
+±2.5 m** — against 5 satellites and a 238 m wander through a window. The track
+is solid blue for its whole length: every fix cleared the ±10 m bar, so nothing
+was drawn as an unlocked segment. The vertical axis is still the barometer's;
+only the horizontal comes from GPS.*
+
+The horizontal error that remains is still metres, against a water rocket's
+apogee of tens of metres — which is why GPS is a recovery aid and a post-flight
+record here, never a deployment input (§5.3).
 
 Multi-GNSS including **QZSS**, which has good coverage over the Philippines —
 a meaningful advantage over GPS-only receivers at this latitude. Integrated
@@ -780,8 +840,9 @@ recent ones to a phone that joins late.
 *The same viewer on a phone, served by the ground station over its own Wi-Fi.
 Left: the board controls live, and the source selector reading `Wired link
 (UART)` — what the station is actually running, read from `/health`. Centre:
-live readouts at 23 Hz on the board's clock with zero bad lines, and the latch
-reading `safe` as the **board** reports it. Right: the deployment panel, with
+live readouts on the board's clock with zero bad lines, and the latch reading
+`safe` as the **board** reports it. (The 23 Hz shown was the station's old
+forwarding cap, fixed in v0.3.2 — it now forwards every frame the board sends.) Right: the deployment panel, with
 the console showing messages the flight computer sent down the wire.*
 
 > **None of this carries over to flight.** The flight system arms by a reed
@@ -891,7 +952,7 @@ One line format is shared by the serial path and the Wi-Fi path, so the viewer
 has a single parser regardless of how frames arrive:
 
 ```
-V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus
+V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus,lsw
 ```
 
 Accelerations in g, rates in dps, altitude in metres AGL, velocity in m/s. The
@@ -907,6 +968,7 @@ high-g accelerometer and the GPS.
 | `hacc` | The receiver's **own** horizontal accuracy estimate in metres, or **−1** with no fix or no GPS |
 | `srv` | Servo latch: `0` safe, `1` armed, `2` armed and fired, **−1** if the source has no latch |
 | `srvus` | Pulse width **commanded** to the latch in µs; `0` when not driven |
+| `lsw` | Latch switch: `0` released, `1` engaged, **−1** no switch fitted. The only **measured** field here (§8.1) |
 
 `hacc` earns its place because a position with no accuracy beside it cannot be
 argued with — see §4.5, where a 3D fix on five satellites wandered 238 m and
@@ -1241,9 +1303,35 @@ cannot honour it: there is no feedback path at all. The `srvus` field of §6.6
 is what was *commanded*, never what the horn did, and a stalled, stripped or
 unpowered servo reports exactly the same as a healthy one. Firmware cannot fix
 this. The honest answer is mechanical — **a limit or reed switch on the latch
-confirming the pin actually withdrew** — and it is an open item. Until it
-exists, treat "fired" as "commanded to fire", and confirm release by eye or by
-the ×50 pull test.
+confirming the pin actually withdrew** — and the switch itself is still an open
+item.
+
+**The firmware half is in place (v0.3.2).** Set `LATCH_SWITCH_PIN` to a GP
+number and every commanded move is checked against the switch: after the
+`SERVO_SETTLE_MS` window the sensed state is compared with the commanded one,
+and a disagreement prints `*** LATCH DID NOT RELEASE ***` and sounds the alarm
+pattern. The sensed state is also carried in telemetry as `lsw` (§6.6) — the
+only field there that is measured rather than commanded, which is the entire
+reason it exists.
+
+**The polarity is not arbitrary.** The switch closes to ground when the latch
+is *released*, with the pin held up, so:
+
+| Reads | Means |
+|---|---|
+| `LOW` — closed | Released, and something physical says so |
+| `HIGH` — open | Still engaged |
+
+A disconnected switch, a broken wire, or a pin never fitted all read `HIGH` —
+"still engaged" — so they report a fire that did not happen rather than
+confirming one that did. The other way round would let a snapped wire silently
+certify every release.
+
+**Until a switch is fitted, nothing claims otherwise.** With
+`LATCH_SWITCH_PIN` unset the board logs `SERVO FIRE COMMANDED ... (no feedback
+- not confirmed)`, the status line reads `FIRE COMMANDED`, and the viewer shows
+`latch: FIRE COMMANDED (unconfirmed)` instead of the `FIRED` it used to assert.
+Confirm release by eye, or by the ×50 pull test.
 
 **The critical design rule: the servo must never carry structural load.**
 
@@ -1586,11 +1674,11 @@ address does not appear, stop and fix it — do not proceed hoping.**
 5. Add **ADXL375** → expect `0x53`. Tap it ✔ — address in the scan, boot
    decodes `BW_RATE = 0xD` → 800 Hz, taps register (2.51 g peak observed).
    Note the rest reading is offset-dominated, not 1.00 g (§4.4)
-6. Add **GPS** → expect `0x42`. Take it outside, wait for fix ✔ — address in
-   the scan, boot reports `airborne <1g  OK` at 5 Hz, and a 3D fix has been
-   obtained with coordinates confirmed against a map. **Accuracy is not yet
-   adequate**: 5 satellites through a window gave a fix that wandered 238 m
-   (§4.5). Needs open sky before any figure from it is usable
+6. Add **GPS** → expect `0x42`. Take it outside, wait for fix ✔✔ — address in
+   the scan, boot reports `airborne <1g  OK` at 5 Hz, coordinates confirmed
+   against a map, and **signed off outdoors**: 12 satellites at ±2.5 m,
+   tracking a path walked on foot, against 5 satellites and a 238 m wander
+   through a window (§4.5)
 7. **LoRa** on SPI — test link with the second Pico before integrating
 8. **Servo** on its own supply, with the 220 µF cap. Sweep it
 9. **Reed switch** — confirm LOW with magnet present
@@ -1646,11 +1734,26 @@ before anything else has run.*
 
 > **One anomaly in that scan: `0x7E  (unknown)`.** Nothing in this design lives
 > there, and 0x78–0x7F is the I²C reserved range, so a device ACKing there is
-> not a device. The likely cause is a marginal bus — four sets of pull-ups in
-> parallel on breadboard jumper leads (§4.1) — producing a phantom ACK. Worth
-> resolving before it is blamed on something else: the standing rule is that an
-> address which does not appear must be fixed, and the inverse deserves the same
-> attention.
+> not a device. The standing rule is that an address which does not appear must
+> be fixed; the inverse deserves the same attention.
+>
+> **v0.3.2 makes the scan measure it rather than mention it.** Firmware cannot
+> repair a marginal bus, but it can stop reporting a single pass as though it
+> were a fact. Every address is now probed **eight times, at both 100 kHz and
+> 400 kHz**, and the hit rate is printed beside it. That distinguishes the three
+> cases that a one-shot scan cannot:
+>
+> | Result | Means |
+> |---|---|
+> | 8/8 at both speeds | A device. Believe it. |
+> | Intermittent at either | The bus — SDA is not reaching a clean low inside the ACK window, and the master reads a floating line as an acknowledgement |
+> | Only at 400 kHz | The bus, specifically rise time — the pull-ups cannot charge the line fast enough once the clock shortens |
+>
+> The suspects, in order: **five breakout boards each with its own pull-ups in
+> parallel** — a far stiffer bus than any one of them intends — then lead
+> length, then stub length off the main run. Removing all but one set of
+> pull-ups is the first thing to try. None of this threatens the parts that
+> answer 8/8: it costs noise margin, not correctness, until it does not.
 
 **Status: all four sensors confirmed on hardware.** The boot output above is
 from the assembled stack: every device answers on the bus, and every
@@ -1781,23 +1884,20 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
       current-limits near the servo's ~700 mA stall. Fine on a bench with the
       latch unloaded; re-check before the latch is working against a packed
       chute, and move to its own supply for flight regardless (§7)
-- [ ] **Add mechanical confirmation that the latch released** — a limit or
-      reed switch on the pin. A servo has no feedback path, so "fired" currently
-      means "commanded to fire" and a stalled servo is indistinguishable from a
-      healthy one (§8.1)
+- [ ] **Fit the latch limit switch.** The firmware half is done — set
+      `LATCH_SWITCH_PIN` and moves are confirmed against it, with the sensed
+      state in telemetry as `lsw`. Until the switch exists, "fired" means
+      "commanded to fire" and nothing in the display claims otherwise (§8.1)
 - [ ] Verify the latch on its **own supply with the 220 µF fitted** — servo
       inrush browning out the Pico would reboot the board holding the actuator
-- [ ] **Trim the ADXL375 zero-g offset** — per-axis, against a known
-      orientation. It reads 0.73 g at rest against the LSM6's 1.01 g, which is
-      within specification for a ±200 g part but leaves the channel unusable
-      for absolute magnitude near 1 g (§4.4)
-- [ ] **Take the GPS somewhere with open sky.** It holds a 3D fix and the
-      coordinates are right, but on 5 satellites indoors the position wandered
-      238 m. Expect 10–15 satellites and single-digit metres outdoors (§4.5)
-- [ ] **Resolve the phantom `0x7E` in the I²C scan** — nothing lives there and
-      0x78–0x7F is reserved, so it points at a marginal bus rather than a
-      device. Four sets of pull-ups in parallel on breadboard leads is the
-      prime suspect (§4.1)
+- [ ] **Run `!hgcal` and paste the trim in.** The six-position calibration is
+      implemented (§4.4); what remains is doing it on the bench and committing
+      the three `HG_TRIM_*` constants, since the registers do not survive a
+      power cycle on their own
+- [ ] **Run the v0.3.2 scan and act on what it says about `0x7E`.** The scan
+      now probes eight times at two bus speeds and prints hit rates, which
+      separates a device from a marginal bus (§4.1). If it reads intermittent
+      or appears only at 400 kHz, remove all but one set of pull-ups
 - [ ] Paired LoRa TX/RX test sketches with RSSI + packet-loss logging
 - [ ] **Wire the radio into the ground station.** The producer slot is now
       proven end to end by the wired downlink; what remains is a LoRa driver on
@@ -1853,7 +1953,7 @@ sensor actually is, and `APOGEE_DROP_M` derived from it would trigger on noise.
 
 ---
 
-*v0.3.1 — September 2026. This document reflects design intent and analysis,
+*v0.3.2 — September 2026. This document reflects design intent and analysis,
 much of it first-order rather than validated. Numbers marked as estimates
 should be confirmed by test or FEA before they are relied upon for flight
 safety.*

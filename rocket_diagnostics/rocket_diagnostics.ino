@@ -110,11 +110,13 @@
 //    !buz off|chirp|double|locate|alarm    select a pattern
 //    !beep <hz> <ms>                       one-shot tone, for checking it works
 //    !bz                                   print buzzer status
+//    !hgcal [x+|x-|y+|y-|z+|z-|apply|clear|show]
+//                                          ADXL375 zero-g offset trim
 //
 //  TELEMETRY WIRE FORMAT (command 'v').  Shared with the ground station so the
 //  viewer has one parser for both transports:
 //
-//    V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus
+//    V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus,lsw
 //
 //    ax..az   g          gx..gz  dps        alt  m AGL     vel  m/s
 //    millis   board clock, ms
@@ -126,8 +128,11 @@
 //             or -1 with no fix / no GPS
 //    srv      servo latch: 0 safe, 1 armed, 2 armed and fired
 //    srvus    pulse width COMMANDED to the latch, microseconds; 0 = not driven
+//    lsw      latch switch: 0 released, 1 engaged, -1 no switch fitted.  The
+//             only field here that is MEASURED rather than commanded, which is
+//             the entire reason it exists
 //
-//  Fields 10-17 were appended, never inserted, so a parser that reads only the
+//  Fields 10-18 were appended, never inserted, so a parser that reads only the
 //  first eight or nine fields keeps working unchanged.  -1 rather than 0 marks
 //  "not fitted", because 0 is a legal reading for all three of hg, fix and a
 //  position on the equator.
@@ -190,6 +195,35 @@ int   GYR_RANGE_DPS   = 0;
 //  is about +/-4095 counts, NOT 32767.
 // -----------------------------------------------------------------------------
 const float HG_G_PER_LSB   = 0.049;
+
+// ---- zero-g offset trim -----------------------------------------------------
+// The ADXL375's zero-g offset is specified in WHOLE g, not milli-g: it is a
+// +/-200 g part and the offset scales with the range.  Measured on this bench,
+// 0.73 g at rest against the LSM6's 1.01 g -- within specification, and
+// irrelevant to the part's actual job of catching peaks, but it leaves the
+// channel unusable for absolute magnitude near 1 g and makes the rest check a
+// loose band rather than a real cross-check.
+//
+// The part can fix this itself.  OFSX/OFSY/OFSZ are hardware trim registers
+// applied to the data before it reaches the output registers, so a corrected
+// reading costs nothing at runtime.  The Adafruit library does not expose
+// them; it does expose writeRegister(), and the register numbers come from
+// Adafruit_ADXL343.h.
+//
+// The scale factor below is the datasheet's, but nothing depends on it being
+// exact: `!hgcal apply` ADDS its correction to whatever is already in the
+// register, having measured the residual WITH that value applied.  So it is a
+// fixed-point iteration -- run it twice and the error falls by the square of
+// however wrong this constant is.  A datasheet number used as a starting
+// guess, not as a dependency.
+const float HG_OFS_G_PER_LSB = 0.196;
+
+// Calibration is not persistent: an RP2040 has no EEPROM, and writing flash at
+// runtime to store three bytes is not a trade worth making.  `!hgcal apply`
+// prints these three lines ready to paste; re-flash and the trim is permanent.
+const int8_t HG_TRIM_X = 0;
+const int8_t HG_TRIM_Y = 0;
+const int8_t HG_TRIM_Z = 0;
 const float HG_RANGE_G     = 200.0;
 int         HG_RATE_HZ     = 0;      // decoded from BW_RATE at boot
 
@@ -402,6 +436,47 @@ const uint32_t SERVO_SETTLE_MS = 800;
 uint32_t servoLastMoveMs = 0;
 uint32_t servoDetachAtMs = 0;           // 0 = no detach pending
 
+// ---- latch feedback ---------------------------------------------------------
+// The one place the readback rule of this sketch cannot be honoured in
+// firmware: a hobby servo has no feedback path, so a stalled, stripped or
+// unpowered one reports exactly the same as a healthy one.  The fix is
+// mechanical -- a switch the mechanism itself closes -- and this is the
+// firmware waiting for it.  Set LATCH_SWITCH_PIN to a GP number once one is
+// fitted and every commanded move is checked against it.
+//
+// WIRING, and the polarity is not arbitrary.  Switch between the pin and GND,
+// closed when the latch is RELEASED.  INPUT_PULLUP, so:
+//
+//     LOW   switch closed   ->  released, and something physical says so
+//     HIGH  switch open     ->  still engaged
+//
+// A disconnected switch, a broken wire or a pin never fitted all read HIGH,
+// which is "still engaged" -- so they report a fire that did not happen rather
+// than confirming one that did.  The wrong way round would let a snapped wire
+// silently certify every release.
+const int LATCH_SWITCH_PIN = -1;        // -1 = not fitted; no pin is touched
+
+uint32_t latchConfirmAtMs = 0;          // 0 = no confirmation pending
+int      latchExpect      = -1;         // what the switch should read by then
+
+// -1 unknown / not fitted, 0 released, 1 engaged.
+int latchSensed() {
+  if (LATCH_SWITCH_PIN < 0) return -1;
+  return digitalRead(LATCH_SWITCH_PIN) == LOW ? 0 : 1;
+}
+
+// Same, but only after five reads agree.  Used at the confirmation point,
+// where a bouncing contact would otherwise decide whether the latch worked.
+int latchSensedSettled() {
+  if (LATCH_SWITCH_PIN < 0) return -1;
+  int v = latchSensed();
+  for (int k = 0; k < 4; k++) {
+    delay(2);
+    if (latchSensed() != v) return -1;  // still moving: refuse to judge
+  }
+  return v;
+}
+
 // =============================================================================
 //  BUZZER  (GP7, LS3040 piezo, ~4 kHz resonant)
 //
@@ -574,10 +649,236 @@ bool startHighG() {
   Out.print(HG_G_PER_LSB, 3);
   Out.println(F(" g/LSB (no range register to read back)"));
 
+  // The compile-time trim from `!hgcal apply`, written and read back like
+  // every other setting here.  Zero is the part's own default, so a sketch
+  // that has never been calibrated behaves exactly as it did before.
+  hga.writeRegister(ADXL3XX_REG_OFSX, (uint8_t)HG_TRIM_X);
+  hga.writeRegister(ADXL3XX_REG_OFSY, (uint8_t)HG_TRIM_Y);
+  hga.writeRegister(ADXL3XX_REG_OFSZ, (uint8_t)HG_TRIM_Z);
+  delay(10);
+  int8_t tx = (int8_t)hga.readRegister(ADXL3XX_REG_OFSX);
+  int8_t ty = (int8_t)hga.readRegister(ADXL3XX_REG_OFSY);
+  int8_t tz = (int8_t)hga.readRegister(ADXL3XX_REG_OFSZ);
+  Out.print(F("  offset   = X")); Out.print(tx);
+  Out.print(F(" Y")); Out.print(ty);
+  Out.print(F(" Z")); Out.print(tz);
+  Out.print(F("  ("));
+  Out.print(HG_OFS_G_PER_LSB, 3);
+  Out.print(F(" g/LSB)"));
+  if (tx != HG_TRIM_X || ty != HG_TRIM_Y || tz != HG_TRIM_Z) {
+    Out.println(F("  <-- WRITE DID NOT TAKE"));
+  } else if (!tx && !ty && !tz) {
+    Out.println(F("  - untrimmed; run !hgcal"));
+  } else {
+    Out.println();
+  }
+
   if (bw != ADXL343_DATARATE_800_HZ) {
     Out.println(F("  WARNING: data rate did not take. Check I2C wiring."));
   }
   return true;
+}
+
+
+// =============================================================================
+//  ADXL375 zero-g offset calibration
+//
+//  WHY SIX POSITIONS.  A single reading cannot separate offset from gravity:
+//  an axis reading 0.73 g might be a true 1 g with a -0.27 g bias, or a true
+//  0.73 g held at an angle.  Point the axis up and then down and gravity
+//  cancels itself out of the average:
+//
+//      up   = +1 + bias        down = -1 + bias
+//      (up + down) / 2 = bias
+//
+//  which is the entire trick, and it needs no reference more accurate than
+//  knowing which way is down.  Scale error survives it -- (up - down)/2 should
+//  be 1.000 and is reported so it can be seen -- but the offset registers
+//  cannot correct scale anyway, so that stays an observation.
+//
+//  ONE POSITION PER COMMAND, deliberately.  A guided sequence that blocks
+//  waiting for each orientation would stop the loop for as long as it takes
+//  somebody to turn a breadboard over.  Capturing on command instead means the
+//  sketch keeps running, any single position can be redone without starting
+//  again, and the order does not matter.
+// =============================================================================
+float hgCalUp[3], hgCalDn[3];
+bool  hgCalHasUp[3] = { false, false, false };
+bool  hgCalHasDn[3] = { false, false, false };
+
+const char HG_AXIS_NAME[3] = { 'X', 'Y', 'Z' };
+
+// Average raw counts, in g, with whatever trim is currently in the registers.
+// 64 samples at 5 ms is ~320 ms of blocking -- deliberate, and in the same
+// class as zeroGround() and calibrateGyro(), which block for longer.  The
+// schedule resynchronises afterwards rather than bursting to catch up.
+static void hgAverage(float out[3]) {
+  long sx = 0, sy = 0, sz = 0;
+  const int N = 64;
+  for (int k = 0; k < N; k++) {
+    sx += hga.getX(); sy += hga.getY(); sz += hga.getZ();
+    delay(5);
+  }
+  out[0] = (sx / (float)N) * HG_G_PER_LSB;
+  out[1] = (sy / (float)N) * HG_G_PER_LSB;
+  out[2] = (sz / (float)N) * HG_G_PER_LSB;
+}
+
+static int8_t hgReadTrim(int axis) {
+  return (int8_t)hga.readRegister(ADXL3XX_REG_OFSX + axis);
+}
+
+static void hgPrintTrim(const __FlashStringHelper *lead) {
+  Out.print(lead);
+  for (int a = 0; a < 3; a++) {
+    Out.print(F("  ")); Out.print(HG_AXIS_NAME[a]); Out.print('=');
+    Out.print(hgReadTrim(a));
+  }
+  Out.println();
+}
+
+static void hgCalCapture(int axis, bool up) {
+  float a[3];
+  hgAverage(a);
+
+  // Sanity, loose on purpose: the whole reason this exists is that the reading
+  // is offset by an unknown amount, so "near 1 g" cannot be a tight band.  It
+  // still catches the fault that matters -- the board held the wrong way up --
+  // because that shows in the SIGN and in which axis is largest.
+  float m = a[axis];
+  bool  ok = (up ? (m > 0.4 && m < 1.7) : (m < -0.4 && m > -1.7));
+  for (int k = 0; k < 3 && ok; k++)
+    if (k != axis && fabs(a[k]) > fabs(m)) ok = false;
+
+  if (!ok) {
+    Out.print(F("  !hgcal refused: "));
+    Out.print(HG_AXIS_NAME[axis]);
+    Out.print(up ? F("+ should read near +1 g and be the largest axis, but ")
+                 : F("- should read near -1 g and be the largest axis, but "));
+    Out.print(F("X/Y/Z = "));
+    for (int k = 0; k < 3; k++) { Out.print(a[k], 2); if (k < 2) Out.print('/'); }
+    Out.println(F("  - check which way up the board is"));
+    return;
+  }
+
+  if (up) { hgCalUp[axis] = m; hgCalHasUp[axis] = true; }
+  else    { hgCalDn[axis] = m; hgCalHasDn[axis] = true; }
+
+  Out.print(F("  captured "));
+  Out.print(HG_AXIS_NAME[axis]);
+  Out.print(up ? F("+ = ") : F("- = "));
+  Out.print(m, 3);
+  Out.println(F(" g"));
+}
+
+static void hgCalStatus() {
+  Out.println(F("  !hgcal - ADXL375 zero-g offset trim"));
+  hgPrintTrim(F("  trim now:"));
+  Out.println(F("  Rest the board on each of its six faces in turn and capture:"));
+  Out.print(F("    "));
+  for (int a = 0; a < 3; a++) {
+    for (int u = 0; u < 2; u++) {
+      Out.print(F(" !hgcal "));
+      Out.print(HG_AXIS_NAME[a]);
+      Out.print(u ? '+' : '-');
+      Out.print((u ? hgCalHasUp : hgCalHasDn)[a] ? F("[ok]") : F("[  ]"));
+    }
+  }
+  Out.println();
+  Out.println(F("    then  !hgcal apply   (run it twice; it converges)"));
+  Out.println(F("    also  !hgcal clear   !hgcal show"));
+}
+
+static void hgCalApply() {
+  for (int a = 0; a < 3; a++) {
+    if (!hgCalHasUp[a] || !hgCalHasDn[a]) {
+      Out.print(F("  !hgcal apply refused: "));
+      Out.print(HG_AXIS_NAME[a]);
+      Out.println(F(" is missing a position - all six are needed"));
+      return;
+    }
+  }
+
+  int8_t next[3];
+  Out.println(F("  axis    bias      scale     trim"));
+  for (int a = 0; a < 3; a++) {
+    float bias  = (hgCalUp[a] + hgCalDn[a]) / 2.0f;   // gravity cancels
+    float scale = (hgCalUp[a] - hgCalDn[a]) / 2.0f;   // should be 1.000
+
+    // Added to what is already there, because `bias` was measured WITH it
+    // applied.  That is what makes repeated runs converge.
+    long want = lround(hgReadTrim(a) - bias / HG_OFS_G_PER_LSB);
+    if (want >  127) want =  127;
+    if (want < -128) want = -128;
+    next[a] = (int8_t)want;
+
+    Out.print(F("    "));   Out.print(HG_AXIS_NAME[a]);
+    Out.print(F("   "));    Out.print(bias, 3);
+    Out.print(F(" g   ")); Out.print(scale, 3);
+    Out.print(F("     "));  Out.print(next[a]);
+    if (want == 127 || want == -128) Out.print(F("  <-- CLAMPED, register range"));
+    else if (fabs(scale - 1.0) > 0.15) Out.print(F("  (scale is off; trim cannot fix that)"));
+    Out.println();
+  }
+
+  for (int a = 0; a < 3; a++) hga.writeRegister(ADXL3XX_REG_OFSX + a, (uint8_t)next[a]);
+  delay(20);
+
+  // Readback, rule 1 of this sketch.  A write that silently failed would
+  // otherwise look exactly like a calibration that worked.
+  bool ok = true;
+  for (int a = 0; a < 3; a++) if (hgReadTrim(a) != next[a]) ok = false;
+  hgPrintTrim(ok ? F("  written and read back:") : F("  READBACK MISMATCH:"));
+  if (!ok) { Out.println(F("  the write did not take - check I2C wiring")); return; }
+
+  float now[3];
+  hgAverage(now);
+  Out.print(F("  resting magnitude now "));
+  Out.print(sqrt(now[0]*now[0] + now[1]*now[1] + now[2]*now[2]), 3);
+  Out.println(F(" g  (should approach 1.000 - run apply again to refine)"));
+
+  Out.println(F("  Not persistent. Paste into the sketch and re-flash:"));
+  for (int a = 0; a < 3; a++) {
+    Out.print(F("      const int8_t HG_TRIM_"));
+    Out.print(HG_AXIS_NAME[a]);
+    Out.print(F(" = "));
+    Out.print(next[a]);
+    Out.println(';');
+  }
+}
+
+static void hgCalClear() {
+  for (int a = 0; a < 3; a++) {
+    hga.writeRegister(ADXL3XX_REG_OFSX + a, 0);
+    hgCalHasUp[a] = hgCalHasDn[a] = false;
+  }
+  delay(20);
+  hgPrintTrim(F("  trim cleared and captures discarded:"));
+}
+
+// Dispatch for the '!hgcal ...' family.  Split out so handleLineCommand stays
+// a flat list of one-liners.
+void hgCalCommand(const char *w) {
+  if (!hgPresent) { Out.println(F("  !hgcal: no ADXL375 fitted")); return; }
+  if (!*w || !strcmp(w, "status")) { hgCalStatus(); return; }
+  if (!strcmp(w, "apply")) { hgCalApply(); return; }
+  if (!strcmp(w, "clear")) { hgCalClear(); return; }
+  if (!strcmp(w, "show"))  { hgPrintTrim(F("  trim now:")); return; }
+
+  // 'x+' / 'x-' typed at a terminal, 'xup' / 'xdn' from the ground station --
+  // whose allowlist admits only letters and digits, so that a URL cannot
+  // smuggle anything through.  The same six positions either way.
+  int axis = -1;
+  for (int a = 0; a < 3; a++)
+    if (w[0] == HG_AXIS_NAME[a] || w[0] == HG_AXIS_NAME[a] + 32) axis = a;
+  if (axis >= 0) {
+    if (w[1] && !w[2] && (w[1] == '+' || w[1] == '-')) {
+      hgCalCapture(axis, w[1] == '+'); return;
+    }
+    if (!strcmp(w + 1, "up")) { hgCalCapture(axis, true);  return; }
+    if (!strcmp(w + 1, "dn")) { hgCalCapture(axis, false); return; }
+  }
+  Out.print(F("  !hgcal: unknown argument ")); Out.println(w);
 }
 
 // -----------------------------------------------------------------------------
@@ -707,55 +1008,65 @@ void emitViz(Print &o, float ax, float ay, float az,
   o.print(servoFired ? 2 : (servoArmed ? 1 : 0));
   o.print(',');
   o.print(servoNowUs);
+  o.print(',');
+  o.print(latchSensed());
 
   o.println();
 }
 
-void printGpsStatus() {
-  Out.print(F("  GPS: "));
-  if (!gpsPresent) { Out.println(F("not fitted")); return; }
+//  WHERE this prints is a real decision, not a detail.  Everything routed
+//  through `Out` is teed to the wired link and reaches every phone's console.
+//  That is right when a person ASKED -- `g` at the USB terminal, `!g` from a
+//  phone -- and wrong for the automatic 5-second summary, which asked nobody:
+//  with no USB host attached the board stays in table mode and prints one of
+//  these every 5 s forever, burying the acknowledgements and refusals that are
+//  the console's actual job.  So the caller names the destination: `Out` for a
+//  request, plain `Serial` for the summary.
+void printGpsStatus(Print& o) {
+  o.print(F("  GPS: "));
+  if (!gpsPresent) { o.println(F("not fitted")); return; }
 
-  Out.print(F("fix "));
+  o.print(F("fix "));
   switch (gpsFixType) {
-    case 0:  Out.print(F("none"));           break;
-    case 1:  Out.print(F("dead-reckoning")); break;
-    case 2:  Out.print(F("2D"));             break;
-    case 3:  Out.print(F("3D"));             break;
-    case 4:  Out.print(F("GNSS+DR"));        break;
-    case 5:  Out.print(F("time-only"));      break;
-    default: Out.print(gpsFixType);          break;
+    case 0:  o.print(F("none"));           break;
+    case 1:  o.print(F("dead-reckoning")); break;
+    case 2:  o.print(F("2D"));             break;
+    case 3:  o.print(F("3D"));             break;
+    case 4:  o.print(F("GNSS+DR"));        break;
+    case 5:  o.print(F("time-only"));      break;
+    default: o.print(gpsFixType);          break;
   }
-  Out.print(F("   sats "));
-  Out.print(gpsSats);
+  o.print(F("   sats "));
+  o.print(gpsSats);
 
   if (gpsFixType >= 2) {
-    Out.print(F("   "));
-    printDegrees(Out, gpsLat);
-    Out.print(F(", "));
-    printDegrees(Out, gpsLon);
-    Out.print(F("   MSL "));
-    Out.print(gpsAltMslMm / 1000.0, 1);
-    Out.print(F(" m"));
+    o.print(F("   "));
+    printDegrees(o, gpsLat);
+    o.print(F(", "));
+    printDegrees(o, gpsLon);
+    o.print(F("   MSL "));
+    o.print(gpsAltMslMm / 1000.0, 1);
+    o.print(F(" m"));
 
     // The number that tells you whether to believe the two above it.
-    Out.print(F("   +/-"));
-    Out.print(gpsHAccMm / 1000.0, 1);
-    Out.print(F(" m"));
+    o.print(F("   +/-"));
+    o.print(gpsHAccMm / 1000.0, 1);
+    o.print(F(" m"));
     if (gpsSats < 6) {
-      Out.print(F("   <-- only "));
-      Out.print(gpsSats);
-      Out.print(F(" sats, geometry is poor"));
+      o.print(F("   <-- only "));
+      o.print(gpsSats);
+      o.print(F(" sats, geometry is poor"));
     }
   } else if (gpsEverFixed) {
     // Distinguishing "never had a fix" from "had one and lost it" is the
     // difference between a sky-view problem and an antenna or power problem.
-    Out.print(F("   lock LOST "));
-    Out.print((millis() - gpsLastFixMs) / 1000);
-    Out.print(F(" s ago"));
+    o.print(F("   lock LOST "));
+    o.print((millis() - gpsLastFixMs) / 1000);
+    o.print(F(" s ago"));
   } else {
-    Out.print(F("   acquiring - needs sky view"));
+    o.print(F("   acquiring - needs sky view"));
   }
-  Out.println();
+  o.println();
 }
 
 // -----------------------------------------------------------------------------
@@ -866,7 +1177,8 @@ void servoRelease() {
   if (latch.attached()) latch.detach();
 }
 
-// Completes a deferred detach.  Called every loop iteration.
+// Completes a deferred detach, and judges the move once it has had time to
+// happen.  Called every loop iteration.
 void servoService() {
   if (servoDetachAtMs && (long)(millis() - servoDetachAtMs) >= 0) {
     servoDetachAtMs = 0;
@@ -874,12 +1186,39 @@ void servoService() {
     if (latch.attached()) latch.detach();
     Out.println(F("  SERVO pulse train stopped - move complete"));
   }
+
+  // The settle window has passed, so whatever the mechanism was going to do,
+  // it has done.  With no switch fitted there is nothing to compare against
+  // and the check quietly retires -- it does not invent a verdict.
+  if (latchConfirmAtMs && (long)(millis() - latchConfirmAtMs) >= 0) {
+    latchConfirmAtMs = 0;
+    if (LATCH_SWITCH_PIN >= 0) {
+      int got = latchSensedSettled();
+      if (got < 0) {
+        Out.println(F("  LATCH UNCONFIRMED - switch still bouncing or disconnected"));
+      } else if (got == latchExpect) {
+        Out.print(F("  LATCH CONFIRMED "));
+        Out.println(got == 0 ? F("RELEASED") : F("engaged"));
+      } else {
+        // The fault this whole mechanism exists to catch.
+        Out.print(F("  *** LATCH DID NOT "));
+        Out.print(latchExpect == 0 ? F("RELEASE") : F("ENGAGE"));
+        Out.println(F(" - commanded, but the switch disagrees ***"));
+        // Looping, deliberately: a latch that did not release is not a
+        // notification, and it should not stop because nobody looked.
+        // Silence it with `!buz off` once it has been seen.
+        buzzerPlay(BUZ_ALARM, 2, true, "alarm");
+      }
+    }
+    latchExpect = -1;
+  }
 }
 
 void printServoStatus() {
   Out.print(F("  SERVO: "));
   Out.print(servoArmed ? F("ARMED") : F("safe"));
-  if (servoFired) Out.print(F(" (FIRED)"));
+  if (servoFired) Out.print(LATCH_SWITCH_PIN < 0 ? F(" (FIRE COMMANDED)")
+                                                 : F(" (FIRED)"));
   Out.print(F("   pin GP")); Out.print(SERVO_PIN);
   Out.print(F("   commanded "));
   if (servoNowUs) { Out.print(servoNowUs); Out.print(F(" us")); }
@@ -887,7 +1226,19 @@ void printServoStatus() {
   Out.print(F("   latched=")); Out.print(servoLatchedUs);
   Out.print(F(" released=")); Out.print(servoReleasedUs);
   Out.println(F(" us"));
-  Out.println(F("  (commanded, NOT measured - a servo has no feedback path)"));
+  Out.print(F("  feedback: "));
+  if (LATCH_SWITCH_PIN < 0) {
+    Out.println(F("NONE - 'fired' means COMMANDED to fire.  A stalled or"));
+    Out.println(F("            unpowered servo reports exactly the same as a"));
+    Out.println(F("            healthy one.  Fit a switch on GP<n> and set"));
+    Out.println(F("            LATCH_SWITCH_PIN to close this."));
+  } else {
+    Out.print(F("switch on GP"));
+    Out.print(LATCH_SWITCH_PIN);
+    Out.print(F(" reads "));
+    int v = latchSensed();
+    Out.println(v == 0 ? F("RELEASED") : F("engaged"));
+  }
 }
 
 void servoArm(bool on) {
@@ -919,7 +1270,14 @@ bool servoFire() {
   servoWrite(servoReleasedUs);
   servoFired = true;
   buzzerPlay(BUZ_DOUBLE, 4, false, "double");   // audible confirmation of a fire
-  Out.print(F("  SERVO FIRED -> ")); Out.print(servoNowUs); Out.println(F(" us"));
+  // "FIRE COMMANDED", not "FIRED".  Without a switch that is the whole truth
+  // of what just happened, and the log is the record somebody reads later.
+  Out.print(F("  SERVO FIRE COMMANDED -> ")); Out.print(servoNowUs);
+  Out.println(LATCH_SWITCH_PIN < 0 ? F(" us (no feedback - not confirmed)")
+                                   : F(" us - checking the switch"));
+  latchExpect = 0;                              // should end up released
+  latchConfirmAtMs = servoLastMoveMs + SERVO_SETTLE_MS;
+  if (latchConfirmAtMs == 0) latchConfirmAtMs = 1;
   return true;
 }
 
@@ -927,7 +1285,11 @@ void servoRelatch() {
   if (!servoArmed) { Out.println(F("  SERVO refused: not armed")); return; }
   servoWrite(servoLatchedUs);
   servoFired = false;
-  Out.print(F("  SERVO re-latched -> ")); Out.print(servoNowUs); Out.println(F(" us"));
+  Out.print(F("  SERVO re-latch COMMANDED -> ")); Out.print(servoNowUs);
+  Out.println(F(" us"));
+  latchExpect = 1;                              // should end up engaged
+  latchConfirmAtMs = servoLastMoveMs + SERVO_SETTLE_MS;
+  if (latchConfirmAtMs == 0) latchConfirmAtMs = 1;
 }
 
 // -----------------------------------------------------------------------------
@@ -939,7 +1301,7 @@ void servoRelatch() {
 // -----------------------------------------------------------------------------
 void zeroGround();
 void calibrateGyro();
-void printGpsStatus();
+void printGpsStatus(Print& o);
 
 void resetPeaks() {
   altPeak = alt; gPeak = 0; gyroPeak = 0; hgPeak = 0;
@@ -955,7 +1317,7 @@ void handleLineCommand(char *cmd) {
   if      (!strcmp(cmd, "z")) { zeroGround();     return; }
   else if (!strcmp(cmd, "b")) { calibrateGyro();  return; }
   else if (!strcmp(cmd, "r")) { resetPeaks();     return; }
-  else if (!strcmp(cmd, "g")) { printGpsStatus(); return; }
+  else if (!strcmp(cmd, "g")) { printGpsStatus(Out); return; }
 
   if      (!strcmp(cmd, "arm"))   servoArm(true);
   else if (!strcmp(cmd, "safe"))  servoArm(false);
@@ -984,6 +1346,8 @@ void handleLineCommand(char *cmd) {
     Out.print(F("  BUZZER beep ")); Out.print(hz);
     Out.print(F(" Hz for ")); Out.print(ms); Out.println(F(" ms"));
   }
+  else if (!strcmp(cmd, "hgcal")) hgCalCommand("");
+  else if (!strncmp(cmd, "hgcal ", 6)) hgCalCommand(cmd + 6);
   else if (!strcmp(cmd, "hb"))    { /* heartbeat: the timestamp above is it */ }
   else if (!strncmp(cmd, "us ", 3)) {
     if (!servoArmed) { Out.println(F("  SERVO refused: not armed")); return; }
@@ -1111,6 +1475,105 @@ void printHeader() {
 }
 
 // =============================================================================
+//  I2C bus scan
+//
+//  A single pass over the bus answers "is it there", which is the question
+//  that matters when a sensor is missing.  It is the wrong question for the
+//  opposite fault: an address that answers when NOTHING is fitted there.  This
+//  bench has had a persistent phantom at 0x7E, and 0x78-0x7F is reserved by
+//  the I2C specification -- no device may use it, so nothing can legitimately
+//  be answering.  Which leaves the master misreading an ACK.
+//
+//  So probe each address REPEATEDLY, and at two bus speeds.  That turns the
+//  mystery into a measurement:
+//
+//    8/8 at both speeds            a device.  Believe it.
+//    intermittent at either        the bus.  SDA is not reaching a clean low
+//                                  within the ACK window, and the master reads
+//                                  a floating line as an acknowledgement.
+//    only at 400 kHz               the bus, specifically its rise time -- the
+//                                  pull-ups cannot charge the line fast enough
+//                                  once the clock shortens.
+//
+//  None of those is fixed in firmware.  The point is to say which physical
+//  thing to change: parallel pull-ups (five breakout boards each with their
+//  own is a far stiffer bus than any one of them intends), lead length, or
+//  stub length off the main run.
+// =============================================================================
+#define SCAN_TRIES 8
+
+//  The rate the loop actually runs at.  Previously implicit -- Wire.begin()
+//  leaves the Mbed core at its 100 kHz default -- which is fine until the scan
+//  below changes the clock and has to put it back.  Stated, so it can be.
+#define I2C_HZ  100000
+
+//  Reserved by the specification: 0x00-0x07 and 0x78-0x7F.  Nothing may be
+//  addressed here, so an answer is by definition not a device.
+static bool i2cReserved(byte a) { return a <= 0x07 || a >= 0x78; }
+
+//  One probe.  The Wire.write(0) is required on Mbed cores, where a
+//  zero-length endTransmission() issues a read and most devices will not ACK
+//  it.
+//
+//  Side effect: this writes a zero byte to every address on the bus, and now
+//  does so SCAN_TRIES times at each of two speeds.  Re-checked with five parts
+//  fitted -- on the MS5611 it is a harmless ADC-read command, on the ADXL375
+//  register 0 is the read-only device ID, and on the u-blox it only moves the
+//  DDC address pointer.  All three are idempotent, which is what makes the
+//  repeat safe.  Check again if a sixth device joins the bus.
+static bool i2cProbe(byte a) {
+  Wire.beginTransmission(a);
+  Wire.write(0);
+  return Wire.endTransmission() == 0;
+}
+
+static void i2cName(byte a) {
+  if      (a == 0x76 || a == 0x77) Out.print(F("MS5611 barometer"));
+  else if (a == 0x6A || a == 0x6B) Out.print(F("LSM6 accel + gyro"));
+  else if (a == 0x1C || a == 0x1E) Out.print(F("LIS3MDL magnetometer"));
+  else if (a == 0x53 || a == 0x1D) Out.print(F("ADXL375 high-g"));
+  else if (a == 0x42)              Out.print(F("u-blox GPS"));
+  else if (i2cReserved(a))         Out.print(F("RESERVED - cannot be a device"));
+  else                             Out.print(F("(unknown)"));
+}
+
+//  Returns the number of addresses that answered at all; fills `solid` with
+//  how many of those answered every single time.
+static int scanBus(uint32_t hz, int& solid, int& phantom) {
+  Wire.setClock(hz);
+  Out.print(F("I2C scan at "));
+  Out.print(hz / 1000);
+  Out.print(F(" kHz ("));
+  Out.print(SCAN_TRIES);
+  Out.println(F(" probes each):"));
+
+  int found = 0;
+  solid = 0;
+  phantom = 0;
+  for (byte a = 1; a < 127; a++) {
+    int hits = 0;
+    for (int k = 0; k < SCAN_TRIES; k++) if (i2cProbe(a)) hits++;
+    if (hits == 0) continue;
+    found++;
+    if (hits == SCAN_TRIES) solid++;
+    if (i2cReserved(a) || hits < SCAN_TRIES) phantom++;
+
+    Out.print(F("  0x"));
+    if (a < 16) Out.print('0');
+    Out.print(a, HEX);
+    Out.print(F("  "));
+    Out.print(hits);
+    Out.print('/');
+    Out.print(SCAN_TRIES);
+    Out.print(hits == SCAN_TRIES ? F("  ") : F("  <-- INTERMITTENT  "));
+    i2cName(a);
+    Out.println();
+  }
+  if (found == 0) Out.println(F("  nothing found - check wiring and power"));
+  return found;
+}
+
+// =============================================================================
 //  setup
 // =============================================================================
 void setup() {
@@ -1129,38 +1592,44 @@ void setup() {
   }
   Out.println();
 
+  // A switch, if one is fitted.  Pulled up, so an absent or broken one reads
+  // "engaged" and a fire that did nothing is reported rather than confirmed.
+  if (LATCH_SWITCH_PIN >= 0) pinMode(LATCH_SWITCH_PIN, INPUT_PULLUP);
+
   Wire.begin();
 
   // ---- I2C scan.  Always do this first.  If an address does not show up
-  //      here, no amount of driver code will make that sensor work.
-  //      The Wire.write(0) is required on Mbed cores, where a zero-length
-  //      endTransmission() issues a read and most devices will not ACK it.
-  //
-  //      Side effect: this writes a zero byte to every address on the bus.
-  //      Re-checked now that five parts are fitted — on the MS5611 it is a
-  //      harmless ADC-read command, on the ADXL375 register 0 is the
-  //      read-only device ID, and on the u-blox it only moves the DDC address
-  //      pointer.  Check again if a sixth device joins the bus. ------------
-  Out.println(F("I2C scan:"));
-  int found = 0;
-  for (byte a = 1; a < 127; a++) {
-    Wire.beginTransmission(a);
-    Wire.write(0);
-    if (Wire.endTransmission() == 0) {
-      Out.print(F("  0x"));
-      if (a < 16) Out.print('0');
-      Out.print(a, HEX);
-      Out.print(F("  "));
-      if      (a == 0x76 || a == 0x77) Out.println(F("MS5611 barometer"));
-      else if (a == 0x6A || a == 0x6B) Out.println(F("LSM6 accel + gyro"));
-      else if (a == 0x1C || a == 0x1E) Out.println(F("LIS3MDL magnetometer"));
-      else if (a == 0x53 || a == 0x1D) Out.println(F("ADXL375 high-g"));
-      else if (a == 0x42)              Out.println(F("u-blox GPS"));
-      else                             Out.println(F("(unknown)"));
-      found++;
+  //      here, no amount of driver code will make that sensor work. --------
+  int solid100, phantom100, solid400, phantom400;
+  int found100 = scanBus(100000, solid100, phantom100);
+  Out.println();
+  int found400 = scanBus(400000, solid400, phantom400);
+  Wire.setClock(I2C_HZ);            // back to the rate the loop runs at
+  Out.println();
+
+  // The verdict.  Two numbers that disagree are the finding, so say what the
+  // disagreement means rather than leaving it to be noticed.
+  if (phantom100 || phantom400 || found400 != found100) {
+    Out.println(F("  BUS INTEGRITY:"));
+    if (found400 != found100) {
+      Out.print(F("    "));
+      Out.print(found100);
+      Out.print(F(" addresses at 100 kHz, "));
+      Out.print(found400);
+      Out.println(F(" at 400 kHz - the count should not depend on speed."));
     }
+    Out.println(F("    An address that is reserved, or that answers only some"));
+    Out.println(F("    of the time, is not a device: SDA is not reaching a"));
+    Out.println(F("    clean low inside the ACK window and the master is"));
+    Out.println(F("    reading a floating line as an acknowledgement."));
+    Out.println(F("    In order of suspicion: five breakout boards each with"));
+    Out.println(F("    its own pull-ups in parallel (remove all but one set),"));
+    Out.println(F("    then lead length, then stub length off the main run."));
+    Out.println(F("    Harmless for the parts that DO answer 8/8 - it costs"));
+    Out.println(F("    noise margin, not correctness, until it does not."));
+  } else {
+    Out.println(F("  bus integrity: every address solid at both speeds"));
   }
-  if (found == 0) Out.println(F("  nothing found - check wiring and power"));
   Out.println();
 
   // ---- barometer.  reset() loads the calibration constants and skips the
@@ -1265,7 +1734,7 @@ void loop() {
       Serial.println();
       if (!vizMode) printHeader();
     }
-    else if (c == 'g' || c == 'G') { Serial.println(); printGpsStatus(); }
+    else if (c == 'g' || c == 'G') { Serial.println(); printGpsStatus(Out); }
     else if (c == 'h' || c == 'H') printHeader();
   }
 
@@ -1484,13 +1953,15 @@ void loop() {
       } else if (fabs(hgMag - aMag) > 0.15) {
         Serial.print(F("  offset "));
         Serial.print(hgMag - aMag, 2);
-        Serial.println(F(" g, normal for this part - not a fault"));
+        Serial.println(F(" g, normal for this part - run !hgcal to trim it out"));
       } else {
         Serial.println(F("  OK"));
       }
     }
 
-    printGpsStatus();
+    // Serial, not Out: the summary is unsolicited, and teeing it to the
+    // link floods the phone's console every 5 s.  Ask with `g` or `!g`.
+    printGpsStatus(Serial);
 
     // Ceilings are reported as a fraction of the range actually in use, so
     // these stay correct if you widen a range later.

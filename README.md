@@ -27,13 +27,14 @@ monitor shows the fire sequence as the board logged it.*
 *The same viewer on a phone, served by the ground station over its own Wi-Fi.
 Left: the board controls live, and the source selector reading `Wired link
 (UART)` — what the station is actually running, read from `/health`. Centre:
-live readouts at 23 Hz on the board's clock with zero bad lines, and the latch
-reading `safe` as the **board** reports it. Right: the deployment panel, with
+live readouts on the board's clock with zero bad lines, and the latch reading
+`safe` as the **board** reports it. (The 23 Hz shown was the station's old
+forwarding cap, fixed in v0.3.2 — it now forwards every frame the board sends.) Right: the deployment panel, with
 the console showing messages the flight computer sent down the wire.*
 
 ---
 
-## Status: v0.3.1 — work in progress
+## Status: v0.3.2 — work in progress
 
 Early. **All four I²C sensors are on the flight computer and confirmed
 working** and the ground segment works on synthetic data. Everything else in this repository is **design
@@ -43,13 +44,24 @@ intent, not built hardware.**
 |---|---|
 | MS5611 barometer | Wired to the flight Pico, reading |
 | MinIMU-9 v6 board | Wired; LSM6DSO (accel/gyro) reading. LIS3MDL magnetometer not read by the current sketch |
-| ADXL375 high-g | **Wired and reading** — zero-g offset untrimmed |
-| SAM-M8Q GPS | **Wired, configured, 3D fix obtained** — indoor sky view only, accuracy not yet usable |
+| ADXL375 high-g | **Wired and reading** — offset trim implemented (`!hgcal`), not yet run |
+| SAM-M8Q GPS | **Signed off outdoors** — 12 satellites, ±2.5 m, path tracked on foot |
 | Bench diagnostics (`rocket_diagnostics/`) | Working on hardware, all four sensors |
-| Pico W ground station + viewer | Working — **synthetic telemetry only** |
+| Pico W ground station + viewer | Working on **live telemetry** over the wired link, and fully usable from a phone |
 | MG90D servo latch | **Wired to GP6 and driven** — bench harness only, no flight deployment code |
 | RFM95W LoRa ×2 | On the bench, not driven. A **wired UART downlink** stands in for the radio (v0.3.1) |
 | Latch mechanism, collar joint | Not built — the servo drives nothing yet |
+
+<p align="center">
+<img src="docs/images/phone-gps-readouts.jpg" width="45%" alt="Readouts on a phone outdoors: GPS 3D fix, 12 satellites, accuracy plus or minus 2.5 m, 244.9 m from the pad">
+<img src="docs/images/phone-gps-walk.jpg" width="45%" alt="The trajectory tab showing a path walked on foot: a solid blue track curving away from the pad marker across the ground grid">
+</p>
+
+*The GPS signed off outdoors, walked around on foot: **12 satellites at ±2.5 m**
+and a track 245 m from the pad — against 5 satellites and a 238 m wander through
+a window. Every fix cleared the ±10 m gate, so the path drew solid for its whole
+length. The vertical axis is still the barometer's; only the horizontal comes
+from GPS.*
 | Reed switch arming interlock | Not connected |
 | LS3040 buzzer | Not connected |
 | Airframe | Not built |

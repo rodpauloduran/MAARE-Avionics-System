@@ -1,7 +1,7 @@
 # Avionics Status Report
 
 **Water pressure rocket avionics — build status**
-v0.3.1 · September 2026
+v0.3.2 · September 2026
 
 Where the build has actually got to, subsystem by subsystem. The design is
 specified in [`avionics_documentation.md`](avionics_documentation.md); this
@@ -18,8 +18,8 @@ runs on synthetic data.** Everything else is specified, not built.
 |---|---|
 | MS5611 barometer | **Wired to the flight Pico, reading** |
 | MinIMU-9 v6 board | **Wired.** LSM6DSO accel/gyro reading; LIS3MDL magnetometer not read by the current sketch |
-| ADXL375 high-g | **Wired and reading.** Zero-g offset untrimmed — 0.73 g at rest (§4.4) |
-| SAM-M8Q GPS | **Wired, configured, 3D fix obtained.** Indoor sky view only; accuracy not yet usable |
+| ADXL375 high-g | **Wired and reading.** Offset trim implemented (`!hgcal`); not yet run on the bench (§4.4) |
+| SAM-M8Q GPS | **Signed off outdoors** — 12 satellites, ±2.5 m, path tracked on foot |
 | Bench diagnostics | **Working on hardware** for all four sensors |
 | Pico W ground station + viewer | **Working** — synthetic telemetry only |
 | MG90D servo latch | **Wired to GP6, driven by the diagnostics sketch.** Bench harness only |
@@ -79,13 +79,14 @@ the ADXL375 now fitted, the ±2 g ceiling is also less costly — the high-g par
 covers everything above it. Flight ranges (±16 g, ±2000 dps) remain an open
 item.
 
-**Confirmed on hardware, with two qualifications.** All four sensors answer on
+**Confirmed on hardware, with one qualification.** All four sensors answer on
 the bus and every configurable one reports its settings back at boot. The
 ADXL375's zero-g offset is untrimmed, so its absolute magnitude near 1 g is not
-usable (peaks and events, its actual job, are unaffected). The GPS holds a 3D
-fix with coordinates confirmed against a map, but has only been given an indoor
-sky view — on 5 satellites it wandered 238 m, which is why the viewer now
-refuses to take a pad datum from a fix like that.
+usable (peaks and events, its actual job, are unaffected); `!hgcal` implements
+the six-position correction but has not yet been run on the bench. The GPS has been
+**signed off outdoors** — 12 satellites at ±2.5 m, tracking a path walked on
+foot, against the 5 satellites and 238 m wander that an indoor sky view gave.
+The pad-datum gate that indoor result motivated passed every fix in that track.
 
 **Cost of the two new sensors** (`arduino:mbed_rp2040:pico`): flash
 112,536 → **148,883 bytes** (5% → 7%), globals 43,996 → **44,608 bytes**
@@ -201,9 +202,13 @@ locally and is not relied upon.
 **Sensors and radio**
 
 - [ ] **Sign off the ADXL375 on the bench** — address in the scan, boot line
-      decoding 800 Hz, ≈1.0 g at rest, a tap spiking past the LSM6's ceiling
-- [ ] **Sign off the GPS outdoors** — boot line reading `airborne <1g  OK`,
-      then a 3D fix with plausible coordinates within 30–60 s
+      decoding 800 Hz, a tap spiking past the LSM6's ceiling, and ≈1.0 g at
+      rest once `!hgcal` has been run and the `HG_TRIM_*` constants committed
+- [ ] **Fit the latch limit switch.** The firmware confirms every move against
+      it and carries the sensed state in telemetry as soon as
+      `LATCH_SWITCH_PIN` is set; the switch itself is the missing half
+- [ ] **Act on what the v0.3.2 bus scan says about `0x7E`** — eight probes at
+      two speeds separates a device from a marginal bus
 - [ ] Paired LoRa TX/RX test with RSSI + packet-loss logging
 - [ ] Wire the radio into the ground station — the producer slot is proven
       by the wired downlink; what remains is a LoRa driver on SPI (an RFM95W

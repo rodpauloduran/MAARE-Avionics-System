@@ -131,7 +131,7 @@ The wire format (§6.6) is identical to what the flight sketch already emits
 over serial, so the viewer needs **no changes**:
 
 ```
-V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus
+V,ax,ay,az,gx,gy,gz,alt,vel,millis,hg,fix,sats,lat,lon,hacc,srv,srvus,lsw
 ```
 
 Keep the `millis` field when the radio goes in: it is the flight computer's own
@@ -222,6 +222,14 @@ computer is **rebuilt from an allowlist**, never forwarded as typed:
 | `buz off\|chirp\|double\|locate\|alarm`, `beep <hz> <ms>` | buzzer |
 | `z`, `b`, `r`, `g` | re-zero baro, gyro bias, reset peaks, GPS status |
 | `srv`, `bz`, `hb` | servo status, buzzer status, heartbeat |
+| `hgcal xup\|xdn\|yup\|ydn\|zup\|zdn` | capture one face for the ADXL375 offset trim |
+| `hgcal apply\|clear\|show\|status` | compute and write the trim, or inspect it |
+
+`hgcal` is here because the calibration wants both hands on the board, which
+makes a phone the natural place to drive it from. It moves no actuator. The
+positions are spelled `zup`/`zdn` rather than the terminal's `z+`/`z-` because
+the filter above admits only letters, digits and spaces — not a rule worth
+relaxing for punctuation.
 
 Anything else — unknown words, extra arguments, out-of-range numbers, stray
 characters, a second command smuggled after an encoded newline — is refused
@@ -264,6 +272,31 @@ frame forever — which is what the stream did before — makes "radio silent" a
 can tell them apart, because frames keep arriving on time. The fix has to be
 here, at the source, not only in the browser.
 
+### One frame, once, per browser (v0.3.2)
+
+Each frame carries a sequence number, and each connected browser tracks which
+one it has been sent — the same rule the board's messages already used. A
+stream wakes every `STREAM_POLL` (4 ms), and writes only when there is
+something new, so **the delivered rate is the producer's rate**, not this
+station's.
+
+It used to be otherwise, and the difference is worth stating because the old
+behaviour looked correct: a stream slept one frame period and sent whatever
+`latest` held. That capped delivery at the station's own loop period —
+`FRAME_DT` plus the time to write — and the frames the source produced in
+between were simply never sent. A 25 Hz board came out at about 23 Hz. A
+50 Hz radio would have come out at 25.
+
+A browser too slow to keep up still **drops** frames rather than queueing
+them: it is sent the frame that stands now, never a backlog. `await drain()`
+is the back pressure that makes that happen, and it is the right behaviour for
+a live display — an out-of-date frame has no value once a newer one exists.
+
+The rule lives in a `StreamCursor` object rather than inline in
+`serve_stream()`, so `tools/checks/run_checks.py` can drive it with a fake
+clock and no socket. That is not incidental: the capped-rate bug survived
+because there was nothing to call.
+
 ## Verified on hardware
 
 - All routes return correct status codes and content types
@@ -271,6 +304,8 @@ here, at the source, not only in the browser.
 - SSE sustains 25.0 Hz with monotonic timestamps (40.6 ms mean interval)
 - Three simultaneous clients each get full 25 Hz and **identical** frames,
   with the simulation still advancing at 1× — not 3×
+- On the wired source, telemetry reaches a phone at the flight computer's own
+  rate with zero bad lines (v0.3.2; before it was capped at about 23 Hz)
 - Flight profile physics check out: 377 m apogee, 78.5 m/s, 6.01 g peak,
   monotonic ascent
 - Viewer parses and runs under both `file://` (serial) and `http://`

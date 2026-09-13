@@ -30,6 +30,7 @@ Target: Raspberry Pi Pico (RP2040), **official Arduino Mbed OS RP2040 core**
 | Servo PWM | **GP6** | 9 | 50 Hz, separate power rail. As built; §9.1 of the design doc specified GP15 |
 | Buzzer | **GP7** | 10 | As built; §9.1 specified GP13. LS3040 piezo, ~4 kHz |
 | Reed switch (arming) | GP12 | 16 | Internal pull-up, switch to GND |
+| Latch limit switch | *unassigned* | — | Internal pull-up, switch to GND, **closed when RELEASED**. Set `LATCH_SWITCH_PIN` when fitted |
 | Battery sense | GP26 | 31 | ADC0, via 100k/100k divider |
 | Status LED | GP25 | — | Onboard |
 | VSYS (battery in) | — | 39 | 1.8–5.5 V, buck-boost handles LiPo range |
@@ -64,6 +65,12 @@ address appears *before* writing any driver code.
 A real scan from this stack, with all five devices answering, is in §13.2 of the
 design document. It also shows a phantom `0x7E` in the reserved range, which is
 a bus-quality symptom rather than a device — see that section.
+
+**The sketch's own scan probes eight times at 100 kHz and again at 400 kHz**,
+printing the hit rate beside each address (v0.3.2). 8/8 at both speeds is a
+device; intermittent, or present only at 400 kHz, is a marginal bus — and the
+first thing to try is removing all but one set of pull-ups, since five breakout
+boards each carrying their own makes a far stiffer bus than any one intends.
 
 **Scan correctly on this core (§10.1).** A zero-length `endTransmission()`
 issues a *read*-type transaction on Mbed cores, which most devices will not
@@ -312,6 +319,14 @@ get. Gate on satellites and hAcc (this project uses ≥ 6 sats and ≤ 10 m) or 
 the origin deliberately once the receiver has settled.
 
 ### MG90D servo latch (GP6)
+
+**A servo has no feedback path, so the firmware waits for a switch.** Set
+`LATCH_SWITCH_PIN` in the sketch and every commanded move is checked against it
+after the settle window; a disagreement prints `*** LATCH DID NOT RELEASE ***`
+and sounds the alarm. Wire it between the pin and GND, **closed when the latch
+is released** — pulled up, so a disconnected or broken switch reads "still
+engaged" and reports a fire that did not happen rather than confirming one that
+did. Until one is fitted, the board says `FIRE COMMANDED`, not `FIRED`.
 
 ![The MG90D micro servo and LS3040 buzzer on the bench, in front of the
 breadboard stack](docs/images/bench-stack-2.jpg)
